@@ -1,0 +1,418 @@
+{
+  "openapi": "3.1.0",
+  "info": {
+    "title": "ContextZero API Specification",
+    "version": "1.0.0",
+    "description": "API specification for ContextZero tools."
+  },
+  "servers": [
+    {
+      "url": "mcp://scg-v2.internal"
+    }
+  ],
+  "paths": {},
+  "components": {
+    "tools": {
+      "scg_resolve_symbol": {
+        "description": "Resolves a natural language query or symbol query into exact candidate symbols.",
+        "inputSchema": {
+          "type": "object",
+          "properties": {
+            "query": { "type": "string" }
+          },
+          "required": ["query"]
+        },
+        "outputSchema": {
+          "type": "object",
+          "properties": {
+            "candidates": {
+              "type": "array",
+              "items": { "$ref": "#/components/schemas/SymbolCandidate" }
+            },
+            "confidence": { "type": "number" },
+            "ambiguity_reasons": {
+              "type": "array",
+              "items": { "type": "string" }
+            }
+          }
+        }
+      },
+      "scg_find_concept": {
+        "description": "Finds a concept and returns ranked symbols with relation hints.",
+        "inputSchema": {
+          "type": "object",
+          "properties": {
+            "concept": { "type": "string" },
+            "filters": { "type": "object", "nullable": true }
+          },
+          "required": ["concept"]
+        },
+        "outputSchema": {
+          "type": "object",
+          "properties": {
+            "ranked_symbols": { "type": "array", "items": { "$ref": "#/components/schemas/RankedSymbol" } },
+            "relation_hints": { "type": "array", "items": { "type": "string" } },
+            "evidence_summaries": { "type": "array", "items": { "type": "string" } }
+          }
+        }
+      },
+      "scg_get_symbol": {
+        "description": "Fetches a specific symbol by ID, with optional view modes.",
+        "inputSchema": {
+          "type": "object",
+          "properties": {
+            "symbol_id": { "type": "string", "format": "uuid" },
+            "view_mode": { "type": "string", "enum": ["code", "summary", "behavior", "contract", "full"], "default": "full" }
+          },
+          "required": ["symbol_id"]
+        },
+        "outputSchema": {
+          "type": "object",
+          "properties": {
+            "symbol_payload": { "$ref": "#/components/schemas/SymbolPayload" }
+          }
+        }
+      },
+      "scg_get_neighbors": {
+        "description": "Retrieves the local graph neighborhood for a given symbol.",
+        "inputSchema": {
+          "type": "object",
+          "properties": {
+            "symbol_id": { "type": "string", "format": "uuid" },
+            "relation_types": { "type": "array", "items": { "type": "string" } },
+            "depth": { "type": "integer", "default": 1 }
+          },
+          "required": ["symbol_id"]
+        },
+        "outputSchema": {
+          "type": "object",
+          "properties": {
+            "neighborhood": { "$ref": "#/components/schemas/GraphNeighborhood" }
+          }
+        }
+      },
+      "scg_explain_relation": {
+        "description": "Explains the inferred relationship between two symbols.",
+        "inputSchema": {
+          "type": "object",
+          "properties": {
+            "src_symbol_id": { "type": "string", "format": "uuid" },
+            "dst_symbol_id": { "type": "string", "format": "uuid" }
+          },
+          "required": ["src_symbol_id", "dst_symbol_id"]
+        },
+        "outputSchema": {
+          "type": "object",
+          "properties": {
+            "relation_type": { "type": "string" },
+            "confidence": { "type": "number" },
+            "evidence_bundle_summary": { "$ref": "#/components/schemas/EvidenceSummary" }
+          }
+        }
+      },
+      "scg_get_context_capsule": {
+        "description": "Returns a token-budgeted minimal sufficient context capsule.",
+        "inputSchema": {
+          "type": "object",
+          "properties": {
+            "target_id": { "type": "string", "format": "uuid" },
+            "token_budget": { "type": "integer" },
+            "mode": { "type": "string", "enum": ["minimal", "standard", "strict"] }
+          },
+          "required": ["target_id", "token_budget", "mode"]
+        },
+        "outputSchema": {
+          "type": "object",
+          "properties": {
+            "capsule_payload": { "$ref": "#/components/schemas/ContextCapsule" },
+            "omission_rationale": { "type": "array", "items": { "type": "string" } },
+            "uncertainty_notes": { "type": "array", "items": { "type": "string" } }
+          }
+        }
+      },
+      "scg_get_invariants": {
+        "description": "Returns the explicit and derived invariants for a given symbol.",
+        "inputSchema": {
+          "type": "object",
+          "properties": { "symbol_id": { "type": "string", "format": "uuid" } },
+          "required": ["symbol_id"]
+        },
+        "outputSchema": {
+          "type": "object",
+          "properties": {
+            "invariants": { "type": "array", "items": { "$ref": "#/components/schemas/InvariantDetail" } }
+          }
+        }
+      },
+      "scg_get_tests": {
+        "description": "Returns related tests and assertions for a symbol.",
+        "inputSchema": {
+          "type": "object",
+          "properties": { "symbol_id": { "type": "string", "format": "uuid" } },
+          "required": ["symbol_id"]
+        },
+        "outputSchema": {
+          "type": "object",
+          "properties": {
+            "related_tests": { "type": "array", "items": { "$ref": "#/components/schemas/TestSummary" } }
+          }
+        }
+      },
+      "scg_plan_change": {
+        "description": "Plans a code change transaction from a natural language request.",
+        "inputSchema": {
+          "type": "object",
+          "properties": {
+            "task_description": { "type": "string" },
+            "scope_constraints": { "type": "object", "nullable": true }
+          },
+          "required": ["task_description"]
+        },
+        "outputSchema": {
+          "type": "object",
+          "properties": {
+            "target_candidates": { "type": "array", "items": { "$ref": "#/components/schemas/SymbolCandidate" } },
+            "confidence": { "type": "number" },
+            "assumptions": { "type": "array", "items": { "type": "string" } },
+            "initial_blast_radius": { "$ref": "#/components/schemas/BlastRadiusReport" },
+            "recommended_capsule_mode": { "type": "string" }
+          }
+        }
+      },
+      "scg_compute_blast_radius": {
+        "description": "Computes structural, behavioral, contract, homolog, and historical impact.",
+        "inputSchema": {
+          "type": "object",
+          "properties": {
+            "target_symbols": { "type": "array", "items": { "type": "string", "format": "uuid" } },
+            "proposed_change_kind": { "type": "string" }
+          },
+          "required": ["target_symbols", "proposed_change_kind"]
+        },
+        "outputSchema": {
+          "type": "object",
+          "properties": {
+            "impact_report": { "$ref": "#/components/schemas/BlastRadiusReport" }
+          }
+        }
+      },
+      "scg_find_homologs": {
+        "description": "Identifies parallel or conceptually mirrored logic.",
+        "inputSchema": {
+          "type": "object",
+          "properties": {
+            "symbol_id": { "type": "string", "format": "uuid" },
+            "relation_filters": { "type": "array", "items": { "type": "string" } },
+            "minimum_confidence": { "type": "number", "default": 0.70 }
+          },
+          "required": ["symbol_id"]
+        },
+        "outputSchema": {
+          "type": "object",
+          "properties": {
+            "homologs": { "type": "array", "items": { "$ref": "#/components/schemas/HomologSummary" } }
+          }
+        }
+      },
+      "scg_prepare_change": {
+        "description": "Prepares a formal change transaction.",
+        "inputSchema": {
+          "type": "object",
+          "properties": { "plan_id": { "type": "string", "format": "uuid" } },
+          "required": ["plan_id"]
+        },
+        "outputSchema": {
+          "type": "object",
+          "properties": {
+            "transaction_id": { "type": "string", "format": "uuid" },
+            "locked_target_versions": { "type": "array", "items": { "type": "string", "format": "uuid" } },
+            "preconditions": { "type": "array", "items": { "type": "string" } }
+          }
+        }
+      },
+      "scg_apply_patch": {
+        "description": "Applies a patch synchronously inside a validation sandbox.",
+        "inputSchema": {
+          "type": "object",
+          "properties": {
+            "transaction_id": { "type": "string", "format": "uuid" },
+            "patch_set": { "type": "object" }
+          },
+          "required": ["transaction_id", "patch_set"]
+        },
+        "outputSchema": {
+          "type": "object",
+          "properties": {
+            "patch_status": { "type": "string" },
+            "affected_symbols": { "type": "array", "items": { "type": "string", "format": "uuid" } },
+            "reindex_trigger_result": { "type": "string" }
+          }
+        }
+      },
+      "scg_propose_propagation": {
+        "description": "Proposes parallel patches to homologous code symbols.",
+        "inputSchema": {
+          "type": "object",
+          "properties": { "transaction_id": { "type": "string", "format": "uuid" } },
+          "required": ["transaction_id"]
+        },
+        "outputSchema": {
+          "type": "object",
+          "properties": {
+            "propagation_candidates": { "type": "array", "items": { "$ref": "#/components/schemas/PropagationCandidate" } }
+          }
+        }
+      },
+      "scg_apply_propagation": {
+        "description": "Applies a proposed homolog propagation patch.",
+        "inputSchema": {
+          "type": "object",
+          "properties": {
+            "transaction_id": { "type": "string", "format": "uuid" },
+            "target_symbol_id": { "type": "string", "format": "uuid" },
+            "patch": { "type": "object" }
+          },
+          "required": ["transaction_id", "target_symbol_id", "patch"]
+        },
+        "outputSchema": {
+          "type": "object",
+          "properties": { "propagation_result": { "type": "string" } }
+        }
+      },
+      "scg_validate_change": {
+        "description": "Validates the patched transaction via parse, type, and test stages.",
+        "inputSchema": {
+          "type": "object",
+          "properties": {
+            "transaction_id": { "type": "string", "format": "uuid" },
+            "mode": { "type": "string", "enum": ["quick", "standard", "strict"] }
+          },
+          "required": ["transaction_id", "mode"]
+        },
+        "outputSchema": {
+          "type": "object",
+          "properties": {
+            "validation_report": { "$ref": "#/components/schemas/ValidationReport" }
+          }
+        }
+      },
+      "scg_semantic_diff": {
+        "description": "Returns a semantic change summary of the executed edit before committing.",
+        "inputSchema": {
+          "type": "object",
+          "properties": {
+            "transaction_id": { "type": "string", "format": "uuid" },
+            "before_symbol_ids": { "type": "array", "items": { "type": "string", "format": "uuid" }, "nullable": true },
+            "after_symbol_ids": { "type": "array", "items": { "type": "string", "format": "uuid" }, "nullable": true }
+          },
+          "required": ["transaction_id"]
+        },
+        "outputSchema": {
+          "type": "object",
+          "properties": {
+            "semantic_change_summary": { "$ref": "#/components/schemas/SemanticChangeSummary" }
+          }
+        }
+      },
+      "scg_contract_diff": {
+        "description": "Highlights broken or altered contracts and invariants in the transaction.",
+        "inputSchema": {
+          "type": "object",
+          "properties": { "transaction_id": { "type": "string", "format": "uuid" } },
+          "required": ["transaction_id"]
+        },
+        "outputSchema": {
+          "type": "object",
+          "properties": {
+            "contract_delta_summary": { "$ref": "#/components/schemas/ContractDeltaSummary" }
+          }
+        }
+      },
+      "scg_commit_change": {
+        "description": "Commits the vetted change transaction into the repository.",
+        "inputSchema": {
+          "type": "object",
+          "properties": { "transaction_id": { "type": "string", "format": "uuid" } },
+          "required": ["transaction_id"]
+        },
+        "outputSchema": {
+          "type": "object",
+          "properties": {
+            "commit_status": { "type": "string" },
+            "final_reports": { "type": "object" }
+          }
+        }
+      },
+      "scg_rollback_change": {
+        "description": "Reverts a sandbox change and purges transient graph modifications.",
+        "inputSchema": {
+          "type": "object",
+          "properties": { "transaction_id": { "type": "string", "format": "uuid" } },
+          "required": ["transaction_id"]
+        },
+        "outputSchema": {
+          "type": "object",
+          "properties": { "rollback_status": { "type": "string" } }
+        }
+      }
+    },
+    "schemas": {
+      "SymbolCandidate": {
+        "type": "object",
+        "properties": { "symbol_id": { "type": "string" }, "name": { "type": "string" }, "rank": { "type": "number" } }
+      },
+      "RankedSymbol": {
+        "type": "object",
+        "properties": { "symbol_id": { "type": "string" }, "score": { "type": "number" } }
+      },
+      "SymbolPayload": {
+        "type": "object",
+        "properties": { "code": { "type": "string" }, "behavior": { "type": "object" }, "contracts": { "type": "object" } }
+      },
+      "GraphNeighborhood": {
+        "type": "object",
+        "properties": { "nodes": { "type": "array", "items": { "type": "string" } }, "edges": { "type": "array", "items": { "type": "object" } } }
+      },
+      "EvidenceSummary": {
+        "type": "object",
+        "properties": { "semantic": { "type": "number" }, "structural": { "type": "number" } }
+      },
+      "ContextCapsule": {
+        "type": "object",
+        "properties": { "target_code": { "type": "string" }, "context_nodes": { "type": "array", "items": { "type": "object" } } }
+      },
+      "InvariantDetail": {
+        "type": "object",
+        "properties": { "expression": { "type": "string" }, "source": { "type": "string" } }
+      },
+      "TestSummary": {
+        "type": "object",
+        "properties": { "test_id": { "type": "string" }, "assertions": { "type": "array", "items": { "type": "string" } } }
+      },
+      "BlastRadiusReport": {
+        "type": "object",
+        "properties": { "impacted_symbols": { "type": "array", "items": { "type": "object" } } }
+      },
+      "HomologSummary": {
+        "type": "object",
+        "properties": { "symbol_id": { "type": "string" }, "confidence": { "type": "number" } }
+      },
+      "PropagationCandidate": {
+        "type": "object",
+        "properties": { "homolog_id": { "type": "string" }, "patch_proposal": { "type": "object" }, "is_safe": { "type": "boolean" } }
+      },
+      "ValidationReport": {
+        "type": "object",
+        "properties": { "passed": { "type": "boolean" }, "failures": { "type": "array", "items": { "type": "string" } } }
+      },
+      "SemanticChangeSummary": {
+        "type": "object",
+        "properties": { "side_effects_changed": { "type": "boolean" }, "details": { "type": "string" } }
+      },
+      "ContractDeltaSummary": {
+        "type": "object",
+        "properties": { "broken_contracts": { "type": "array", "items": { "type": "string" } } }
+      }
+    }
+  }
+}

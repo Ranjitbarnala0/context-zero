@@ -1,0 +1,67 @@
+{
+  "name": "scg-v2",
+  "version": "1.0.0",
+  "description": "ContextZero — Production-grade code cognition and change orchestration system",
+  "main": "dist/mcp-interface/index.js",
+  "engines": {
+    "node": ">=20.0.0"
+  },
+  "scripts": {
+    "build": "tsc",
+    "start": "node dist/mcp-interface/index.js",
+    "dev": "ts-node src/mcp-interface/index.ts",
+    "typecheck": "tsc --noEmit",
+    "lint": "eslint src/ --ext .ts",
+    "lint:fix": "eslint src/ --ext .ts --fix",
+    "test": "jest",
+    "test:ci": "jest --ci --coverage --forceExit",
+    "test:watch": "jest --watch",
+    "ingest": "ts-node src/ingestor/index.ts",
+    "db:migrate": "ts-node db/migrate.ts",
+    "docker:up": "docker compose up -d",
+    "docker:down": "docker compose down",
+    "docker:logs": "docker compose logs -f scg",
+    "mcp": "node dist/mcp-bridge/index.js",
+    "mcp:dev": "ts-node src/mcp-bridge/index.ts",
+    "prestart": "npm run build"
+  },
+  "keywords": [
+    "contextzero",
+    "code-graph",
+    "mcp",
+    "code-cognition",
+    "ast",
+    "static-analysis",
+    "homolog-detection",
+    "blast-radius"
+  ],
+  "author": "ContextZero Team",
+  "license": "ISC",
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.27.1",
+    "dotenv": "^17.3.1",
+    "express": "^5.2.1",
+    "pg": "^8.20.0",
+    "tree-sitter": "^0.22.4",
+    "tree-sitter-cpp": "^0.23.4",
+    "tree-sitter-go": "^0.23.4",
+    "tree-sitter-python": "^0.23.6",
+    "tree-sitter-typescript": "^0.23.2",
+    "typescript": "^5.9.3",
+    "uuid": "^13.0.0"
+  },
+  "devDependencies": {
+    "@types/dotenv": "^6.1.1",
+    "@types/express": "^5.0.6",
+    "@types/jest": "^29.5.14",
+    "@types/node": "^25.5.0",
+    "@types/pg": "^8.18.0",
+    "@types/uuid": "^10.0.0",
+    "@typescript-eslint/eslint-plugin": "^8.33.1",
+    "@typescript-eslint/parser": "^8.33.1",
+    "eslint": "^8.57.1",
+    "jest": "^29.7.0",
+    "ts-jest": "^29.3.4",
+    "ts-node": "^10.9.2"
+  }
+}
