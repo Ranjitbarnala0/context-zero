@@ -266,18 +266,15 @@ app.post('/scg_register_repo',
             return;
         }
 
-        // Create or update repository with base_path
+        // Create or reuse repository — deduplicate by base_path to prevent
+        // orphaning data when a repo is re-registered after restart (BUG-001).
         const repoId = await coreDataService.createRepository({
             name: repo_name,
             default_branch: default_branch || 'main',
             visibility: visibility || 'private',
             language_set: [],
+            base_path: resolvedPath,
         });
-
-        await db.query(
-            'UPDATE repositories SET base_path = $1 WHERE repo_id = $2',
-            [resolvedPath, repoId]
-        );
 
         log.info('Repository registered', { repo_id: repoId, name: repo_name, path: resolvedPath });
         res.json({ repo_id: repoId, registered_path: resolvedPath });

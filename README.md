@@ -6,6 +6,29 @@ ContextZero builds a deep, versioned understanding of codebases — symbols, rel
 
 Unlike traditional code search or chunk-based RAG, ContextZero operates on **exact versioned symbols**, **evidence-backed inference**, and **transactional editing** — giving AI coding agents the precision substrate they need to modify code safely at scale.
 
+### Why ContextZero
+
+| Problem | How ContextZero solves it |
+|---|---|
+| **AI reads too much code** | Context capsules deliver the minimum sufficient code for a task — not whole files, not arbitrary chunks. Typical 60-80% reduction in tokens sent to the model. |
+| **AI edits break things silently** | 5-dimensional blast radius analysis catches structural, behavioral, contract, homolog, and historical impacts before code ships. |
+| **Duplicate logic hides across the codebase** | 7-dimension homolog detection finds parallel validators, mirrored auth logic, and copy-pasted business rules — even when they share no structural link. |
+| **Edits are fire-and-forget** | Transactional change engine with 9-state lifecycle, 6-level validation, sandbox execution, and rollback. Every edit is a tracked, validated, reversible operation. |
+| **Context costs scale with repo size** | Native TF-IDF + MinHash + LSH embeddings — zero external API calls. No OpenAI, no Cohere, no embedding costs. All computation is local. |
+| **Code search is fuzzy and imprecise** | Symbol resolution returns exact AST-bound symbols with line ranges, signatures, and types — not text matches. |
+
+### What ContextZero replaces
+
+ContextZero is not a search engine. It replaces the entire stack of `grep` + embeddings + chunk retrieval + file edits with a single, coherent system that understands code at the symbol level. One ingestion pass gives you:
+
+- **535+ symbols** extracted with exact line ranges, signatures, and type information
+- **Behavioral fingerprints** for every function (pure / read-only / read-write / side-effecting)
+- **Contract profiles** (input types, output types, error contracts, security contracts)
+- **Structural relations** (calls, imports, inherits, typed_as, overrides)
+- **Homolog detection** across disconnected code
+- **Blast radius** before and after any change
+- **Minimal context capsules** that fit any token budget
+
 ---
 
 ## Architecture
@@ -319,18 +342,33 @@ npx ts-node db/migrate.ts --status    # Check migration status
 
 ---
 
+## Bug Reports
+
+We treat every bug report as a P0. If you find an issue — wrong analysis, missing data, crashes, incorrect classifications — we fix it natively, not with patches. Permanent, root-cause fixes only.
+
+**Report bugs**: [Open an issue](https://github.com/Ranjitbarnala0/context-zero/issues) with:
+- The tool name and input you used
+- What ContextZero returned
+- What the correct result should be
+- Source code snippet if possible
+
+We respond to bug reports and ship fixes rapidly.
+
+---
+
 ## Enterprise
 
-ContextZero is **free and open source** for individual developers, startups, and open-source projects under the ISC license.
+ContextZero is **free and open source** under the ISC license. Individual developers, startups, and open-source projects can use it without any restrictions.
 
-For organizations that need production deployment support, we offer:
+For enterprises deploying ContextZero on production codebases, we offer:
 
 - **Priority Support** — Direct engineering support with SLA guarantees
 - **Custom Language Adapters** — tree-sitter grammar development for proprietary or niche languages
-- **Private Deployment** — On-premise or private cloud deployment assistance
-- **Custom Integrations** — Integration with internal CI/CD, code review, and IDE toolchains
+- **Private Deployment** — On-premise, air-gapped, or private cloud deployment with security hardening
+- **Custom Integrations** — CI/CD pipelines, code review systems, IDE extensions, internal toolchains
 - **Advanced Features** — Runtime trace ingestion, framework-specific plugins (NestJS, Django, FastAPI, Prisma), and custom homolog classification models
-- **Training** — Team onboarding and architecture workshops
+- **Training & Architecture** — Team onboarding, codebase analysis workshops, and architecture consulting
+- **Dedicated Engineering** — Custom feature development for your specific codebase and workflow needs
 
 **Contact**: [ranjitbarnala0@gmail.com](mailto:ranjitbarnala0@gmail.com)
 
@@ -338,6 +376,6 @@ For organizations that need production deployment support, we offer:
 
 ## License
 
-ISC License — free for everyone. See [LICENSE](LICENSE) for details.
+ISC License — free for everyone, forever. See [LICENSE](LICENSE) for details.
 
-Individual developers, startups, and enterprises can all use ContextZero freely. Enterprise services (support, custom development, deployment assistance) are available separately.
+Use ContextZero however you want — personal projects, commercial products, enterprise infrastructure. No restrictions, no usage limits, no tracking. Enterprise services (support, deployment, custom development) are available separately for organizations that need them.

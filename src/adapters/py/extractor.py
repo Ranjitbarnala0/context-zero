@@ -35,18 +35,18 @@ BEHAVIOR_PATTERNS: List[Dict[str, str]] = [
     {"pattern": r"\.fetchmany\s*\(", "hint_type": "db_read", "detail": "fetchmany()"},
     {"pattern": r"\.select\s*\(", "hint_type": "db_read", "detail": "select()"},
     {"pattern": r"\.filter\s*\(", "hint_type": "db_read", "detail": "filter()"},
-    {"pattern": r"\.get\s*\(", "hint_type": "db_read", "detail": "get()"},
-    {"pattern": r"\.all\s*\(", "hint_type": "db_read", "detail": "all()"},
-    {"pattern": r"\.first\s*\(", "hint_type": "db_read", "detail": "first()"},
+    {"pattern": r"(session|cursor|queryset|objects)\.get\s*\(", "hint_type": "db_read", "detail": "get()"},
+    {"pattern": r"(\.objects\.all\s*\(|session\.query.*\.all\s*\()", "hint_type": "db_read", "detail": "all()"},
+    {"pattern": r"(\.objects\.first\s*\(|session\.query.*\.first\s*\(|queryset\.first\s*\()", "hint_type": "db_read", "detail": "first()"},
     {"pattern": r"session\.query\s*\(", "hint_type": "db_read", "detail": "sqlalchemy_query"},
     # DB writes
     {"pattern": r"\.insert\s*\(", "hint_type": "db_write", "detail": "insert()"},
     {"pattern": r"\.update\s*\(", "hint_type": "db_write", "detail": "update()"},
     {"pattern": r"\.delete\s*\(", "hint_type": "db_write", "detail": "delete()"},
     {"pattern": r"\.commit\s*\(", "hint_type": "db_write", "detail": "commit()"},
-    {"pattern": r"\.add\s*\(", "hint_type": "db_write", "detail": "add()"},
+    {"pattern": r"(session\.add\s*\(|\.objects\.add\s*\()", "hint_type": "db_write", "detail": "add()"},
     {"pattern": r"\.merge\s*\(", "hint_type": "db_write", "detail": "merge()"},
-    {"pattern": r"\.save\s*\(", "hint_type": "db_write", "detail": "save()"},
+    {"pattern": r"(\.save\s*\(\s*\)|session\.save\s*\()", "hint_type": "db_write", "detail": "save()"},
     {"pattern": r"\.bulk_create\s*\(", "hint_type": "db_write", "detail": "bulk_create()"},
     {"pattern": r"\.bulk_update\s*\(", "hint_type": "db_write", "detail": "bulk_update()"},
     # Network calls
@@ -100,6 +100,19 @@ BEHAVIOR_PATTERNS: List[Dict[str, str]] = [
     {"pattern": r"\bsetattr\s*\(", "hint_type": "state_mutation", "detail": "setattr"},
     {"pattern": r"\bglobal\s+\w+", "hint_type": "state_mutation", "detail": "global_mutation"},
     {"pattern": r"\bnonlocal\s+\w+", "hint_type": "state_mutation", "detail": "nonlocal_mutation"},
+    # PyTorch / ML state mutations
+    {"pattern": r"\.data\.copy_\s*\(", "hint_type": "state_mutation", "detail": "tensor_inplace_copy"},
+    {"pattern": r"\.eval\s*\(\s*\)", "hint_type": "state_mutation", "detail": "model_eval"},
+    {"pattern": r"\.train\s*\(\s*\)", "hint_type": "state_mutation", "detail": "model_train"},
+    {"pattern": r"\w+_\s*\(", "hint_type": "state_mutation", "detail": "inplace_operation"},
+    {"pattern": r"\.zero_\s*\(", "hint_type": "state_mutation", "detail": "gradient_zero"},
+    {"pattern": r"\.backward\s*\(", "hint_type": "state_mutation", "detail": "backprop"},
+    {"pattern": r"\.step\s*\(", "hint_type": "state_mutation", "detail": "optimizer_step"},
+    {"pattern": r"\.load_state_dict\s*\(", "hint_type": "state_mutation", "detail": "load_state"},
+    {"pattern": r"\.copy_\s*\(", "hint_type": "state_mutation", "detail": "inplace_copy"},
+    {"pattern": r"\.clamp_\s*\(", "hint_type": "state_mutation", "detail": "inplace_clamp"},
+    {"pattern": r"\.fill_\s*\(", "hint_type": "state_mutation", "detail": "inplace_fill"},
+    {"pattern": r"\.lerp_\s*\(", "hint_type": "state_mutation", "detail": "inplace_lerp"},
     # Transaction
     {"pattern": r"@atomic", "hint_type": "transaction", "detail": "atomic_decorator"},
     {"pattern": r"\.begin\s*\(", "hint_type": "transaction", "detail": "begin()"},
@@ -299,12 +312,18 @@ class FullExtractor(cst.CSTVisitor):
         # Scope tracking
         self._class_stack: List[str] = []  # stack of class names for nesting
         self._function_stack: List[str] = []  # stack of function stable_keys
+        self._function_name_stack: List[str] = []  # stack of function names for stable key construction
         self._known_symbol_names: Set[str] = set()
 
     def _make_stable_key(self, name: str) -> str:
-        """Build a stable key like filename#ClassName.method_name."""
+        """Build a stable key like filename#ClassName.method_name or filename#outerFunc.innerFunc."""
+        parts: List[str] = []
         if self._class_stack:
-            return f"{self.filename}#{'.'.join(self._class_stack)}.{name}"
+            parts.extend(self._class_stack)
+        if self._function_name_stack:
+            parts.extend(self._function_name_stack)
+        if parts:
+            return f"{self.filename}#{'.'.join(parts)}.{name}"
         return f"{self.filename}#{name}"
 
     def _get_node_text(self, pos) -> str:
@@ -636,6 +655,12 @@ class FullExtractor(cst.CSTVisitor):
         except Exception:
             self.uncertainty_flags.append("normalization_failure")
 
+        # Nested functions (inside another function, outside a class) are private
+        if self._function_name_stack and not self._class_stack:
+            visibility = "private"
+        else:
+            visibility = self._get_visibility(name)
+
         self.symbols.append({
             "stable_key": stable_key,
             "canonical_name": name,
@@ -648,7 +673,7 @@ class FullExtractor(cst.CSTVisitor):
             "ast_hash": ast_hash,
             "body_hash": body_hash,
             "normalized_ast_hash": normalized_ast_hash,
-            "visibility": self._get_visibility(name),
+            "visibility": visibility,
         })
 
         # Behavior hints: scan function body text for side-effect patterns
@@ -659,6 +684,7 @@ class FullExtractor(cst.CSTVisitor):
 
         # Relations: calls, references within the function body
         self._function_stack.append(stable_key)
+        self._function_name_stack.append(name)
         self._extract_calls_from_body(node, stable_key)
 
         return True  # Continue visiting children
@@ -666,6 +692,8 @@ class FullExtractor(cst.CSTVisitor):
     def leave_FunctionDef(self, node: cst.FunctionDef):
         if self._function_stack:
             self._function_stack.pop()
+        if self._function_name_stack:
+            self._function_name_stack.pop()
 
     def _extract_calls_from_body(self, node: cst.FunctionDef, source_key: str):
         """Walk a FunctionDef body to find call expressions.

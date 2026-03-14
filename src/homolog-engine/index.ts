@@ -375,7 +375,7 @@ export class HomologInferenceEngine {
         if (historySim > 0.1) familyCount++;
 
         // Weighted total
-        const weightedTotal =
+        let weightedTotal =
             HOMOLOG_WEIGHTS.semantic_intent_similarity * semanticSim +
             HOMOLOG_WEIGHTS.normalized_logic_similarity * logicSim +
             HOMOLOG_WEIGHTS.signature_type_similarity * sigSim +
@@ -383,6 +383,19 @@ export class HomologInferenceEngine {
             HOMOLOG_WEIGHTS.contract_overlap * contractOverlap +
             HOMOLOG_WEIGHTS.test_overlap * testOverlap +
             HOMOLOG_WEIGHTS.history_co_change * historySim;
+
+        // BUG-007 fix: Structural identity override.
+        // When logicSim >= 0.85, the function bodies are structurally identical
+        // (matching body_hash, normalized_ast_hash, or ast_hash). This is
+        // definitive near-duplicate evidence that implies semantic, signature,
+        // and behavioral similarity. Without this override, a structurally
+        // identical pair can be filtered out by MIN_EVIDENCE_FAMILIES (needs >= 2)
+        // or by the confidence threshold (0.70) when other dimensions lack data
+        // (e.g., no semantic vectors, no behavioral profiles).
+        if (logicSim >= 0.85) {
+            weightedTotal = Math.max(weightedTotal, 0.85);
+            familyCount = Math.max(familyCount, 3);
+        }
 
         return {
             semantic_intent_similarity: semanticSim,

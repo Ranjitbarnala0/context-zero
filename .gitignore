@@ -37,3 +37,4 @@ pgdata/
 # Temporary
 tmp/
 .tmp/
+**/__pycache__/

@@ -61,12 +61,37 @@ export class CapsuleCompiler {
         }
 
         const resolvedBasePath = repoBasePath ? path.resolve(repoBasePath) : null;
-        const targetCode = await this.readSourceCode(resolvedBasePath, target.file_path, target.range_start_line, target.range_end_line);
+        let targetCode = await this.readSourceCode(resolvedBasePath, target.file_path, target.range_start_line, target.range_end_line);
         let usedTokens = this.estimateTokens(targetCode) + this.estimateTokens(target.signature);
 
         const contextNodes: ContextNode[] = [];
         const omissionRationale: string[] = [];
         const uncertaintyNotes: string[] = [];
+
+        // BUG-006 FIX: If the target code alone exceeds the token budget,
+        // truncate it to fit within the budget.
+        if (usedTokens > effectiveBudget) {
+            const signatureTokens = this.estimateTokens(target.signature);
+            const availableForCode = effectiveBudget - signatureTokens;
+            if (availableForCode <= 0) {
+                targetCode = '[Target code omitted — token budget too small]';
+            } else {
+                const codeLines = targetCode.split('\n');
+                const truncatedLines: string[] = [];
+                let runningTokens = 0;
+                for (const line of codeLines) {
+                    const lineTokens = this.estimateTokens(line + '\n');
+                    if (runningTokens + lineTokens > availableForCode) {
+                        break;
+                    }
+                    truncatedLines.push(line);
+                    runningTokens += lineTokens;
+                }
+                targetCode = truncatedLines.join('\n');
+                omissionRationale.push('Target code truncated to fit token budget');
+            }
+            usedTokens = this.estimateTokens(targetCode) + signatureTokens;
+        }
 
         if (target.uncertainty_flags.length > 0) {
             uncertaintyNotes.push(
@@ -206,7 +231,43 @@ export class CapsuleCompiler {
         try {
             const content = fs.readFileSync(resolved, 'utf-8');
             const lines = content.split('\n');
-            return lines.slice(startLine - 1, endLine).join('\n');
+
+            // BUG-005 FIX: Defensive validation of line ranges to prevent
+            // code boundary leakage from stale or mis-indexed DB data.
+            const clampedStart = Math.max(1, startLine);
+            const clampedEnd = Math.min(lines.length, endLine);
+
+            if (clampedStart !== startLine || clampedEnd !== endLine) {
+                log.warn('Line range clamped — possible stale DB line numbers', {
+                    filePath, startLine, endLine,
+                    clampedStart, clampedEnd, totalLines: lines.length,
+                });
+            }
+
+            if (clampedStart > clampedEnd) {
+                log.warn('Invalid line range after clamping', {
+                    filePath, clampedStart, clampedEnd,
+                });
+                return `[Source code unavailable — invalid line range]`;
+            }
+
+            const extracted = lines.slice(clampedStart - 1, clampedEnd);
+
+            // Warn if the first non-empty line doesn't look like a symbol definition —
+            // may indicate the DB range_start_line includes preceding code.
+            const firstNonEmpty = extracted.find(l => l.trim().length > 0);
+            if (firstNonEmpty) {
+                const trimmed = firstNonEmpty.trim();
+                const looksLikeDefinition = /^(export\s+)?(default\s+)?(async\s+)?(function|class|const|let|var|type|interface|enum|def |abstract\s|public\s|private\s|protected\s)/.test(trimmed)
+                    || /^(\/\*\*|\/\/|#|\*)/.test(trimmed);       // doc-comment is also OK
+                if (!looksLikeDefinition) {
+                    log.warn('Extracted code may include preceding function — first non-empty line does not start with a recognized keyword', {
+                        filePath, startLine: clampedStart, firstLine: trimmed.slice(0, 120),
+                    });
+                }
+            }
+
+            return extracted.join('\n');
         } catch {
             return `[Source code unavailable — file not readable]`;
         }

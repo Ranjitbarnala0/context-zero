@@ -29,6 +29,7 @@ export interface RepositoryInput {
     default_branch: string;
     visibility: 'public' | 'private';
     language_set: string[];
+    base_path?: string;
 }
 
 export interface SnapshotInput {
@@ -99,12 +100,37 @@ export interface SymbolVersionRow {
 export class CoreDataService {
 
     public async createRepository(input: RepositoryInput): Promise<string> {
+        // BUG-001 fix: Deduplicate by base_path first.
+        // If a repo already exists at the same filesystem path, return its ID
+        // and update its metadata — prevents orphaning old data on restart.
+        if (input.base_path) {
+            const byPath = await db.query(
+                `SELECT repo_id FROM repositories WHERE base_path = $1`,
+                [input.base_path]
+            );
+            if (byPath.rowCount && byPath.rowCount > 0) {
+                const existingId = extractId(byPath.rows[0] as Record<string, unknown> | undefined, 'repo_id');
+                await db.query(`
+                    UPDATE repositories
+                    SET name = $1, default_branch = $2, visibility = $3, language_set = $4, updated_at = NOW()
+                    WHERE repo_id = $5
+                `, [input.name, input.default_branch, input.visibility, input.language_set, existingId]);
+                log.info('Repository matched by base_path — updated metadata', { repo_id: existingId, name: input.name, base_path: input.base_path });
+                return existingId;
+            }
+        }
+
         const id = uuidv4();
         await db.query(`
-            INSERT INTO repositories (repo_id, name, default_branch, visibility, language_set)
-            VALUES ($1, $2, $3, $4, $5)
-            ON CONFLICT (name) DO NOTHING
-        `, [id, input.name, input.default_branch, input.visibility, input.language_set]);
+            INSERT INTO repositories (repo_id, name, default_branch, visibility, language_set, base_path)
+            VALUES ($1, $2, $3, $4, $5, $6)
+            ON CONFLICT (name) DO UPDATE SET
+                default_branch = EXCLUDED.default_branch,
+                visibility = EXCLUDED.visibility,
+                language_set = EXCLUDED.language_set,
+                base_path = COALESCE(EXCLUDED.base_path, repositories.base_path),
+                updated_at = NOW()
+        `, [id, input.name, input.default_branch, input.visibility, input.language_set, input.base_path || null]);
         const existing = await db.query(`SELECT repo_id FROM repositories WHERE name = $1`, [input.name]);
         const repoId = extractId(existing.rows[0] as Record<string, unknown> | undefined, 'repo_id');
         log.info('Repository ensured', { repo_id: repoId, name: input.name });
