@@ -108,7 +108,8 @@ export class StructuralGraphEngine {
             statements.push({
                 text: `INSERT INTO structural_relations (relation_id, src_symbol_version_id, dst_symbol_version_id, relation_type, strength, source, confidence)
                        VALUES ($1, $2, $3, $4, $5, $6, $7)
-                       ON CONFLICT (src_symbol_version_id, dst_symbol_version_id, relation_type) DO NOTHING`,
+                       ON CONFLICT (src_symbol_version_id, dst_symbol_version_id, relation_type)
+                       DO UPDATE SET confidence = GREATEST(structural_relations.confidence, EXCLUDED.confidence)`,
                 params: [uuidv4(), srcSvId, dstSvId, rel.relation_type, 1.0, 'static_analysis', 0.90],
             });
             persisted++;

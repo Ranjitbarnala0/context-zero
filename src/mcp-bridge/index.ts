@@ -497,4 +497,7 @@ process.on('uncaughtException', (err: Error) => {
 });
 
 // Start the server
-void main();
+main().catch((err: unknown) => {
+    log.error('Fatal error in main', err instanceof Error ? err : new Error(String(err)));
+    process.exit(1);
+});

@@ -631,13 +631,12 @@ export class HomologInferenceEngine {
     }
 
     private async computeTestOverlap(svIdA: string, svIdB: string): Promise<number> {
-        // Check if both symbols are tested by any common test
+        // Count test artifacts whose related_symbols contain BOTH svIdA and svIdB
         const result = await db.query(`
             SELECT COUNT(*) as cnt
-            FROM test_artifacts ta1
-            JOIN test_artifacts ta2 ON ta1.symbol_version_id = ta2.symbol_version_id
-            WHERE $1 = ANY(ta1.related_symbols)
-            AND $2 = ANY(ta2.related_symbols)
+            FROM test_artifacts ta
+            WHERE $1 = ANY(ta.related_symbols)
+            AND $2 = ANY(ta.related_symbols)
         `, [svIdA, svIdB]);
 
         const count = parseInt(result.rows[0]?.cnt as string || '0', 10);

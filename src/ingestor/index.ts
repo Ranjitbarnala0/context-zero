@@ -69,12 +69,13 @@ export class Ingestor {
         const timer = log.startTimer('ingestRepo', { repoPath, repoName, commitSha });
         const startTime = Date.now();
 
-        // 1. Ensure repository exists
+        // 1. Ensure repository exists (pass base_path so incremental indexing works)
         const repoId = await coreDataService.createRepository({
             name: repoName,
             default_branch: branch,
             visibility: 'private',
             language_set: [],
+            base_path: repoPath,
         });
 
         // 2. Create snapshot
@@ -203,7 +204,14 @@ export class Ingestor {
         // 7.5 Populate test artifacts
         await this.populateTestArtifacts(svRows, snapshotId, repoId);
 
-        // 8. Update snapshot status
+        // 8. Update repository language_set and snapshot status
+        if (languageSet.size > 0) {
+            await db.query(
+                `UPDATE repositories SET language_set = $1, updated_at = NOW() WHERE repo_id = $2`,
+                [Array.from(languageSet), repoId]
+            );
+        }
+
         const finalStatus = filesFailed > 0 && filesProcessed === 0 ? 'failed'
             : filesFailed > 0 ? 'partial'
             : 'complete';
@@ -265,6 +273,12 @@ export class Ingestor {
         }
 
         // Phase 1: Merge symbols and batch insert.
+        // Track symbolId→svEntry to deduplicate: if two extracted symbols
+        // share the same (symbol_id, snapshot_id), the ON CONFLICT DO UPDATE
+        // keeps the original symbol_version_id. We must use the DB's actual
+        // symbol_version_id in Phase 3, not the generated svId.
+        const symbolIdToEntry = new Map<string, { svId: string; sym: ExtractedSymbol; symbolId: string }>();
+
         for (const sym of extraction.symbols) {
             let stableKeyPath = sym.stable_key.split('#')[0] || '';
             if (path.isAbsolute(stableKeyPath)) {
@@ -326,7 +340,8 @@ export class Ingestor {
                     )
                 ],
             });
-            svEntries.push({ svId, sym });
+            // Deduplicate: keep the last entry per symbolId (matches ON CONFLICT DO UPDATE behavior)
+            symbolIdToEntry.set(symbolId, { svId, sym, symbolId });
         }
 
         // Phase 2: Batch insert all symbol versions in a single transaction
@@ -334,8 +349,24 @@ export class Ingestor {
             await db.batchInsert(svInsertStatements);
         }
 
-        // Phase 3: Process behavior and contract hints (requires svIds from batch)
-        for (const { svId, sym } of svEntries) {
+        // Phase 2.5: Resolve actual symbol_version_ids from the DB.
+        // When ON CONFLICT DO UPDATE fires, the DB keeps the existing
+        // symbol_version_id, not the one we generated. Query the DB
+        // to get the real IDs for Phase 3.
+        const resolvedEntries: { svId: string; sym: ExtractedSymbol }[] = [];
+        for (const entry of symbolIdToEntry.values()) {
+            const actualSvResult = await db.query(
+                `SELECT symbol_version_id FROM symbol_versions WHERE symbol_id = $1 AND snapshot_id = $2`,
+                [entry.symbolId, snapshotId]
+            );
+            const actualSvId = actualSvResult.rows[0]?.symbol_version_id as string;
+            if (actualSvId) {
+                resolvedEntries.push({ svId: actualSvId, sym: entry.sym });
+            }
+        }
+
+        // Phase 3: Process behavior and contract hints (uses resolved svIds)
+        for (const { svId, sym } of resolvedEntries) {
             // Process behavior hints for this symbol.
             // Always create a profile — even for symbols with zero hints.
             // A pure function with empty arrays IS its behavioral profile.
