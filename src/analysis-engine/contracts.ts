@@ -98,7 +98,9 @@ export class ContractEngine {
             statements.push({
                 text: `INSERT INTO invariants (invariant_id, repo_id, scope_symbol_id, scope_level, expression, source_type, strength, validation_method, last_verified_snapshot_id)
                        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
-                       ON CONFLICT DO NOTHING`,
+                       ON CONFLICT (repo_id, COALESCE(scope_symbol_id, '00000000-0000-0000-0000-000000000000'::uuid), expression)
+                       DO UPDATE SET strength = GREATEST(invariants.strength, EXCLUDED.strength),
+                                     last_verified_snapshot_id = EXCLUDED.last_verified_snapshot_id`,
                 params: [uuidv4(), repoId, testSv.symbol_id, 'symbol',
                     `test:${testSv.canonical_name} asserts behavior of target symbol`,
                     'explicit_test', 0.90, 'test_execution', snapshotId],
@@ -115,7 +117,9 @@ export class ContractEngine {
             statements.push({
                 text: `INSERT INTO invariants (invariant_id, repo_id, scope_symbol_id, scope_level, expression, source_type, strength, validation_method, last_verified_snapshot_id)
                        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
-                       ON CONFLICT DO NOTHING`,
+                       ON CONFLICT (repo_id, COALESCE(scope_symbol_id, '00000000-0000-0000-0000-000000000000'::uuid), expression)
+                       DO UPDATE SET strength = GREATEST(invariants.strength, EXCLUDED.strength),
+                                     last_verified_snapshot_id = EXCLUDED.last_verified_snapshot_id`,
                 params: [uuidv4(), repoId, schemaSv.symbol_id, 'module',
                     `schema:${schemaSv.canonical_name} enforces data shape constraints`,
                     'schema', 0.95, 'schema_validation', snapshotId],
@@ -145,7 +149,9 @@ export class ContractEngine {
                 statements.push({
                     text: `INSERT INTO invariants (invariant_id, repo_id, scope_symbol_id, scope_level, expression, source_type, strength, validation_method, last_verified_snapshot_id)
                            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
-                           ON CONFLICT DO NOTHING`,
+                           ON CONFLICT (repo_id, COALESCE(scope_symbol_id, '00000000-0000-0000-0000-000000000000'::uuid), expression)
+                       DO UPDATE SET strength = GREATEST(invariants.strength, EXCLUDED.strength),
+                                     last_verified_snapshot_id = EXCLUDED.last_verified_snapshot_id`,
                     params: [uuidv4(), repoId, sv.symbol_id, 'symbol',
                         `validation:${sv.canonical_name} performs input validation (${bp.validation_operations.join(', ')})`,
                         'derived', 0.75, 'behavioral_inference', snapshotId],
@@ -164,7 +170,9 @@ export class ContractEngine {
                 statements.push({
                     text: `INSERT INTO invariants (invariant_id, repo_id, scope_symbol_id, scope_level, expression, source_type, strength, validation_method, last_verified_snapshot_id)
                            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
-                           ON CONFLICT DO NOTHING`,
+                           ON CONFLICT (repo_id, COALESCE(scope_symbol_id, '00000000-0000-0000-0000-000000000000'::uuid), expression)
+                       DO UPDATE SET strength = GREATEST(invariants.strength, EXCLUDED.strength),
+                                     last_verified_snapshot_id = EXCLUDED.last_verified_snapshot_id`,
                     params: [uuidv4(), repoId, sv.symbol_id, 'symbol',
                         `error_contract:${sv.canonical_name} may throw ${cp.error_contract}`,
                         'derived', 0.70, 'contract_inference', snapshotId],
@@ -175,7 +183,9 @@ export class ContractEngine {
                 statements.push({
                     text: `INSERT INTO invariants (invariant_id, repo_id, scope_symbol_id, scope_level, expression, source_type, strength, validation_method, last_verified_snapshot_id)
                            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
-                           ON CONFLICT DO NOTHING`,
+                           ON CONFLICT (repo_id, COALESCE(scope_symbol_id, '00000000-0000-0000-0000-000000000000'::uuid), expression)
+                       DO UPDATE SET strength = GREATEST(invariants.strength, EXCLUDED.strength),
+                                     last_verified_snapshot_id = EXCLUDED.last_verified_snapshot_id`,
                     params: [uuidv4(), repoId, sv.symbol_id, 'symbol',
                         `security:${sv.canonical_name} requires ${cp.security_contract}`,
                         'derived', 0.85, 'contract_inference', snapshotId],
@@ -192,7 +202,9 @@ export class ContractEngine {
                     statements.push({
                         text: `INSERT INTO invariants (invariant_id, repo_id, scope_symbol_id, scope_level, expression, source_type, strength, validation_method, last_verified_snapshot_id)
                                VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
-                               ON CONFLICT DO NOTHING`,
+                               ON CONFLICT (repo_id, COALESCE(scope_symbol_id, '00000000-0000-0000-0000-000000000000'::uuid), expression)
+                       DO UPDATE SET strength = GREATEST(invariants.strength, EXCLUDED.strength),
+                                     last_verified_snapshot_id = EXCLUDED.last_verified_snapshot_id`,
                         params: [uuidv4(), repoId, sv.symbol_id, 'symbol',
                             `exception:${sv.canonical_name} raises ${throwPatterns.map((t: unknown) => String(t).replace('throws:', '')).join(', ')}`,
                             'derived', 0.80, 'behavioral_inference', snapshotId],
@@ -209,7 +221,9 @@ export class ContractEngine {
                     statements.push({
                         text: `INSERT INTO invariants (invariant_id, repo_id, scope_symbol_id, scope_level, expression, source_type, strength, validation_method, last_verified_snapshot_id)
                                VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
-                               ON CONFLICT DO NOTHING`,
+                               ON CONFLICT (repo_id, COALESCE(scope_symbol_id, '00000000-0000-0000-0000-000000000000'::uuid), expression)
+                       DO UPDATE SET strength = GREATEST(invariants.strength, EXCLUDED.strength),
+                                     last_verified_snapshot_id = EXCLUDED.last_verified_snapshot_id`,
                         params: [uuidv4(), repoId, sv.symbol_id, 'symbol',
                             `resource_access:${sv.canonical_name} (${bp.purity_class}) touches ${resources.slice(0, 5).join(', ')}`,
                             'derived', 0.65, 'behavioral_inference', snapshotId],

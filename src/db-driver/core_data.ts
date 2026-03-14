@@ -346,6 +346,9 @@ export class CoreDataService {
                 invariant_id, repo_id, scope_symbol_id, scope_level,
                 expression, source_type, strength, validation_method, last_verified_snapshot_id
             ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
+            ON CONFLICT (repo_id, COALESCE(scope_symbol_id, '00000000-0000-0000-0000-000000000000'::uuid), expression)
+            DO UPDATE SET strength = GREATEST(invariants.strength, EXCLUDED.strength),
+                          last_verified_snapshot_id = EXCLUDED.last_verified_snapshot_id
         `, [
             id, invariant.repo_id, invariant.scope_symbol_id, invariant.scope_level,
             invariant.expression, invariant.source_type, invariant.strength,

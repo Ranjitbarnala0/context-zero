@@ -127,6 +127,9 @@ CREATE TABLE invariants (
     last_verified_snapshot_id UUID REFERENCES snapshots(snapshot_id) ON DELETE SET NULL
 );
 
+CREATE UNIQUE INDEX idx_invariants_dedup
+    ON invariants (repo_id, COALESCE(scope_symbol_id, '00000000-0000-0000-0000-000000000000'::uuid), expression);
+
 -- 6. Homolog Inference and Evidence
 CREATE TABLE evidence_bundles (
     evidence_bundle_id UUID PRIMARY KEY,
