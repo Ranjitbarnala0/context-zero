@@ -45,7 +45,7 @@ CREATE TABLE IF NOT EXISTS semantic_vectors (
     symbol_version_id UUID NOT NULL REFERENCES symbol_versions(symbol_version_id) ON DELETE CASCADE,
     view_type VARCHAR(50) NOT NULL,  -- 'name', 'body', 'signature', 'behavior', 'contract'
     sparse_vector JSONB NOT NULL,  -- {token: tfidf_score, ...}
-    minhash_signature INTEGER[] NOT NULL,  -- MinHash for LSH
+    minhash_signature BIGINT[] NOT NULL,  -- MinHash for LSH (values can exceed signed int32 range)
     token_count INTEGER NOT NULL,
     created_at TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT NOW(),
     UNIQUE(symbol_version_id, view_type)

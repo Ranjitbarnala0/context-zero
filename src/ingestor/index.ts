@@ -202,7 +202,14 @@ export class Ingestor {
         // Mine invariants from tests
         await contractEngine.mineInvariantsFromTests(repoId, snapshotId, svRows);
 
-        // 7.5 Populate test artifacts
+        // 7.5 Propagate behavioral profiles transitively through the call graph.
+        // This must run AFTER all profiles AND relations are created.
+        // Without this, main() → train() → torch.save() would leave main() as "pure"
+        // because pattern matching only scans each function's own body text.
+        const propagated = await behavioralEngine.propagateTransitive(snapshotId);
+        log.info('Behavioral profiles propagated transitively', { snapshotId, propagated });
+
+        // 7.6 Populate test artifacts
         await this.populateTestArtifacts(svRows, snapshotId, repoId);
 
         // 7.6 Compute semantic embeddings (TF-IDF + MinHash + LSH)
