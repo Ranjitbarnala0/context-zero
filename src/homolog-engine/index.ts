@@ -332,7 +332,11 @@ export class HomologInferenceEngine {
         }
         if (semanticSim > 0.1) familyCount++;
 
-        // Dimension 2: Normalized logic similarity (graduated hash comparison)
+        // Dimension 2: Normalized logic similarity
+        // Hash tiers give exact/near-exact matches. When hashes diverge,
+        // fall back to MinHash Jaccard on tokenized body — this gives
+        // graduated 0.0–1.0 similarity for functions that share logic
+        // (e.g., two train() functions) but aren't byte-identical.
         let logicSim: number;
         if (target.body_hash === candidate.body_hash) {
             logicSim = 1.0; // Identical body
@@ -342,7 +346,14 @@ export class HomologInferenceEngine {
         } else if (target.ast_hash === candidate.ast_hash) {
             logicSim = 0.85; // AST match (whitespace-sensitive)
         } else {
-            logicSim = 0.0;
+            // Graduated fallback: MinHash body similarity
+            try {
+                logicSim = await semanticEngine.computeBodySimilarity(
+                    target.symbol_version_id, candidate.symbol_version_id
+                );
+            } catch {
+                logicSim = 0.0;
+            }
         }
         if (logicSim > 0.1) familyCount++;
 
@@ -559,18 +570,37 @@ export class HomologInferenceEngine {
         if (!a || !b) return 0.0;
         if (a === b) return 1.0;
 
-        // Compare parameter count and return type similarity
+        let score = 0;
+
+        // Compare parameter counts — graduated instead of binary
         const paramsA = (a.match(/\((.*?)\)/)?.[1] || '').split(',').filter(Boolean);
         const paramsB = (b.match(/\((.*?)\)/)?.[1] || '').split(',').filter(Boolean);
-
-        const paramCountSim = paramsA.length === paramsB.length ? 0.5 : 0.0;
+        const maxParams = Math.max(paramsA.length, paramsB.length);
+        if (maxParams === 0) {
+            score += 0.4; // Both zero-arg
+        } else {
+            const minParams = Math.min(paramsA.length, paramsB.length);
+            score += 0.4 * (minParams / maxParams); // 3/4 params → 0.3
+        }
 
         // Compare return types
         const retA = a.split(':').pop()?.trim() || '';
         const retB = b.split(':').pop()?.trim() || '';
-        const retSim = retA === retB ? 0.5 : 0.0;
+        if (retA && retB && retA === retB) {
+            score += 0.4;
+        }
 
-        return paramCountSim + retSim;
+        // Compare param type tokens (Jaccard on type keywords)
+        const typeTokensA = new Set(a.replace(/[(),:]/g, ' ').toLowerCase().split(/\s+/).filter(t => t.length > 1));
+        const typeTokensB = new Set(b.replace(/[(),:]/g, ' ').toLowerCase().split(/\s+/).filter(t => t.length > 1));
+        if (typeTokensA.size > 0 && typeTokensB.size > 0) {
+            let overlap = 0;
+            for (const t of typeTokensA) if (typeTokensB.has(t)) overlap++;
+            const union = new Set([...typeTokensA, ...typeTokensB]).size;
+            score += 0.2 * (overlap / union);
+        }
+
+        return Math.min(1.0, score);
     }
 
     private async computeBehavioralOverlap(svIdA: string, svIdB: string): Promise<number> {
@@ -672,7 +702,7 @@ export class HomologInferenceEngine {
             JOIN symbols s ON s.symbol_id = sv.symbol_id
             WHERE sv.symbol_version_id = $1
         `, [svId]);
-        return result.rows[0] as CandidateRow ?? null;
+        return (result.rows[0] as CandidateRow | undefined) ?? null;
     }
 
     private async loadBehavioralProfile(svId: string): Promise<BehavioralProfile | null> {
@@ -684,7 +714,7 @@ export class HomologInferenceEngine {
             `SELECT * FROM behavioral_profiles WHERE symbol_version_id = $1`,
             [svId]
         );
-        const profile = result.rows[0] as BehavioralProfile ?? null;
+        const profile = (result.rows[0] as BehavioralProfile | undefined) ?? null;
         if (profile) profileCache.set(cacheKey, profile);
         return profile;
     }
@@ -698,7 +728,7 @@ export class HomologInferenceEngine {
             `SELECT * FROM contract_profiles WHERE symbol_version_id = $1`,
             [svId]
         );
-        const profile = result.rows[0] as ContractProfile ?? null;
+        const profile = (result.rows[0] as ContractProfile | undefined) ?? null;
         if (profile) profileCache.set(cacheKey, profile);
         return profile;
     }

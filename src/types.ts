@@ -356,6 +356,7 @@ export interface ExtractedSymbol {
     ast_hash: string;
     body_hash: string;
     normalized_ast_hash?: string;
+    summary?: string;
     visibility: string;
 }
 
@@ -406,17 +407,17 @@ export interface IngestionResult {
 // CONSTANTS
 
 export const HOMOLOG_WEIGHTS = {
-    semantic_intent_similarity: 0.20,
-    normalized_logic_similarity: 0.20,
+    semantic_intent_similarity: 0.25,
+    normalized_logic_similarity: 0.15,
     signature_type_similarity: 0.15,
-    behavioral_overlap: 0.15,
-    contract_overlap: 0.15,
+    behavioral_overlap: 0.20,
+    contract_overlap: 0.10,
     test_overlap: 0.10,
     history_co_change: 0.05,
 } as const;
 
 export const MIN_EVIDENCE_FAMILIES = 2;
-export const DEFAULT_HOMOLOG_CONFIDENCE_THRESHOLD = 0.70;
+export const DEFAULT_HOMOLOG_CONFIDENCE_THRESHOLD = 0.60;
 
 // Express Request type extension for correlation IDs
 declare global {

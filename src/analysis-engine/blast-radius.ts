@@ -83,6 +83,7 @@ export class BlastRadiusEngine {
         let frontier = [...targetIds];
 
         for (let d = 0; d < depth && frontier.length > 0; d++) {
+            const visitedArray = Array.from(visited);
             const placeholders = frontier.map((_, i) => `$${i + 1}`).join(',');
             const result = await db.query(`
                 SELECT sr.src_symbol_version_id, sr.relation_type, sr.confidence,
@@ -92,7 +93,7 @@ export class BlastRadiusEngine {
                 JOIN symbols s ON s.symbol_id = sv.symbol_id
                 WHERE sr.dst_symbol_version_id IN (${placeholders})
                 AND sr.src_symbol_version_id != ALL($${frontier.length + 1}::uuid[])
-            `, [...frontier, targetIds]);
+            `, [...frontier, visitedArray]);
 
             const nextFrontier: string[] = [];
 

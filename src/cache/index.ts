@@ -77,14 +77,16 @@ export class LRUCache<T = unknown> {
     }
 
     public invalidateByPrefix(prefix: string): number {
-        let count = 0;
+        const toDelete: string[] = [];
         for (const key of this.store.keys()) {
             if (key.startsWith(prefix)) {
-                this.store.delete(key);
-                count++;
+                toDelete.push(key);
             }
         }
-        return count;
+        for (const key of toDelete) {
+            this.store.delete(key);
+        }
+        return toDelete.length;
     }
 
     public clear(): void {

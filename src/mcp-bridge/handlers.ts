@@ -258,9 +258,9 @@ export async function handleGetUncertainty(args: Record<string, unknown>, log: M
 export async function handleFindHomologs(args: Record<string, unknown>, log: McpLogger): Promise<CallToolResult> {
     const symbol_version_id = args.symbol_version_id as string;
     const snapshot_id = args.snapshot_id as string;
-    const confidence_threshold = typeof args.confidence_threshold === 'number'
-        ? Math.min(Math.max(args.confidence_threshold, 0), 1)
-        : 0.70;
+    const rawConf = typeof args.confidence_threshold === 'number' ? args.confidence_threshold
+        : typeof args.confidence_threshold === 'string' ? parseFloat(args.confidence_threshold) : NaN;
+    const confidence_threshold = Number.isFinite(rawConf) ? Math.min(Math.max(rawConf, 0), 1) : 0.60;
 
     if (!isUUID(symbol_version_id)) return errorResult('symbol_version_id is required and must be a valid UUID');
     if (!isUUID(snapshot_id)) return errorResult('snapshot_id is required and must be a valid UUID');
@@ -279,7 +279,8 @@ export async function handleFindHomologs(args: Record<string, unknown>, log: Mcp
 export async function handleBlastRadius(args: Record<string, unknown>, log: McpLogger): Promise<CallToolResult> {
     const symbol_version_ids = args.symbol_version_ids;
     const snapshot_id = args.snapshot_id as string;
-    const depth = typeof args.depth === 'number' ? Math.min(Math.max(args.depth, 1), 5) : 2;
+    const rawDepth = typeof args.depth === 'number' ? args.depth : typeof args.depth === 'string' ? parseInt(args.depth, 10) : NaN;
+    const depth = Number.isFinite(rawDepth) ? Math.min(Math.max(rawDepth, 1), 5) : 2;
 
     if (!Array.isArray(symbol_version_ids) || symbol_version_ids.length === 0) {
         return errorResult('symbol_version_ids is required and must be a non-empty array of UUIDs');
@@ -596,9 +597,9 @@ export async function handleSnapshotStats(args: Record<string, unknown>, log: Mc
 export async function handlePersistHomologs(args: Record<string, unknown>, log: McpLogger): Promise<CallToolResult> {
     const source_symbol_version_id = args.source_symbol_version_id as string;
     const snapshot_id = args.snapshot_id as string;
-    const confidence_threshold = typeof args.confidence_threshold === 'number'
-        ? Math.min(Math.max(args.confidence_threshold, 0), 1)
-        : 0.70;
+    const rawConf = typeof args.confidence_threshold === 'number' ? args.confidence_threshold
+        : typeof args.confidence_threshold === 'string' ? parseFloat(args.confidence_threshold) : NaN;
+    const confidence_threshold = Number.isFinite(rawConf) ? Math.min(Math.max(rawConf, 0), 1) : 0.60;
 
     if (!isUUID(source_symbol_version_id)) return errorResult('source_symbol_version_id is required and must be a valid UUID');
     if (!isUUID(snapshot_id)) return errorResult('snapshot_id is required and must be a valid UUID');
@@ -614,4 +615,353 @@ export async function handlePersistHomologs(args: Record<string, unknown>, log: 
     );
 
     return textResult({ homologs_found: homologs.length, persisted });
+}
+
+// ────────── Tool 23: Read Source Code ──────────
+//
+// This is the tool the evaluator was missing. ContextZero had 22 tools
+// but none could actually show source code. Users had to bypass MCP
+// and read files manually. This tool reads source code by symbol ID
+// or by file path within a registered repository.
+
+export async function handleReadSource(args: Record<string, unknown>, log: McpLogger): Promise<CallToolResult> {
+    const repo_id = args.repo_id as string;
+    const symbol_version_id = args.symbol_version_id as string | undefined;
+    const file_path = args.file_path as string | undefined;
+    const start_line = typeof args.start_line === 'number' ? args.start_line : undefined;
+    const end_line = typeof args.end_line === 'number' ? args.end_line : undefined;
+    const context_lines = typeof args.context_lines === 'number' ? Math.min(args.context_lines, 50) : 0;
+
+    if (!isUUID(repo_id)) return errorResult('repo_id is required and must be a valid UUID');
+    if (!symbol_version_id && !file_path) return errorResult('Either symbol_version_id or file_path is required');
+    if (symbol_version_id && !isUUID(symbol_version_id)) return errorResult('symbol_version_id must be a valid UUID');
+
+    log.debug('scg_read_source', { repo_id, symbol_version_id, file_path });
+
+    // Resolve repo base path
+    const repo = await coreDataService.getRepository(repo_id);
+    if (!repo) return errorResult('Repository not found');
+    const basePath = repo.base_path as string;
+    if (!basePath) return errorResult('Repository base path not configured');
+
+    const fs = await import('fs');
+    const path = await import('path');
+
+    let resolvedPath: string;
+    let rangeStart: number | undefined = start_line;
+    let rangeEnd: number | undefined = end_line;
+    let symbolMeta: Record<string, unknown> | null = null;
+
+    if (symbol_version_id) {
+        // Resolve from symbol version
+        const svResult = await db.query(`
+            SELECT sv.range_start_line, sv.range_end_line, sv.signature, sv.summary,
+                   s.canonical_name, s.kind, s.stable_key,
+                   f.path as file_path
+            FROM symbol_versions sv
+            JOIN symbols s ON s.symbol_id = sv.symbol_id
+            JOIN files f ON f.file_id = sv.file_id
+            WHERE sv.symbol_version_id = $1
+        `, [symbol_version_id]);
+
+        if (svResult.rows.length === 0) return errorResult('Symbol version not found');
+
+        const sv = svResult.rows[0] as Record<string, unknown>;
+        resolvedPath = path.resolve(basePath, sv.file_path as string);
+        rangeStart = rangeStart ?? (sv.range_start_line as number) - context_lines;
+        rangeEnd = rangeEnd ?? (sv.range_end_line as number) + context_lines;
+        symbolMeta = {
+            canonical_name: sv.canonical_name,
+            kind: sv.kind,
+            signature: sv.signature,
+            summary: sv.summary,
+            file_path: sv.file_path,
+            range: `${sv.range_start_line}-${sv.range_end_line}`,
+        };
+    } else {
+        // Resolve from file path
+        resolvedPath = path.resolve(basePath, file_path!);
+    }
+
+    // Path traversal protection
+    const realBase = fs.realpathSync(basePath);
+    if (!resolvedPath.startsWith(realBase + path.sep) && resolvedPath !== realBase) {
+        return errorResult('Path traversal blocked');
+    }
+
+    try {
+        const content = fs.readFileSync(resolvedPath, 'utf-8');
+        const lines = content.split('\n');
+
+        let outputLines: string[];
+        if (rangeStart !== undefined && rangeEnd !== undefined) {
+            const s = Math.max(1, rangeStart);
+            const e = Math.min(lines.length, rangeEnd);
+            outputLines = lines.slice(s - 1, e).map((line, i) => `${s + i}: ${line}`);
+        } else {
+            // Full file, cap at 500 lines
+            const cap = Math.min(lines.length, 500);
+            outputLines = lines.slice(0, cap).map((line, i) => `${i + 1}: ${line}`);
+            if (lines.length > 500) {
+                outputLines.push(`... (${lines.length - 500} more lines truncated)`);
+            }
+        }
+
+        return textResult({
+            ...(symbolMeta ? { symbol: symbolMeta } : {}),
+            file_path: file_path || (symbolMeta as Record<string, unknown>)?.file_path,
+            total_lines: lines.length,
+            source: outputLines.join('\n'),
+        });
+    } catch {
+        return errorResult('File not readable');
+    }
+}
+
+// ────────── Tool 24: Search Code ──────────
+//
+// Grep/search across indexed files in a repository. Returns matching
+// lines with context. This enables deep audit through MCP without
+// needing to read every file manually.
+
+export async function handleSearchCode(args: Record<string, unknown>, log: McpLogger): Promise<CallToolResult> {
+    const repo_id = args.repo_id as string;
+    const pattern = args.pattern as string;
+    const file_pattern = args.file_pattern as string | undefined;
+    const max_results = typeof args.max_results === 'number' ? Math.min(args.max_results, 100) : 30;
+    const context_lines_count = typeof args.context_lines === 'number' ? Math.min(args.context_lines, 5) : 2;
+
+    if (!isUUID(repo_id)) return errorResult('repo_id is required and must be a valid UUID');
+    if (!pattern || typeof pattern !== 'string') return errorResult('pattern is required');
+    if (pattern.length > 500) return errorResult('pattern too long (max 500 chars)');
+
+    log.debug('scg_search_code', { repo_id, pattern, file_pattern });
+
+    // Resolve repo base path
+    const repo = await coreDataService.getRepository(repo_id);
+    if (!repo) return errorResult('Repository not found');
+    const basePath = repo.base_path as string;
+    if (!basePath) return errorResult('Repository base path not configured');
+
+    const fs = await import('fs');
+    const path = await import('path');
+
+    // Get indexed files for this repo
+    const filesResult = await db.query(`
+        SELECT DISTINCT f.path FROM files f
+        JOIN snapshots snap ON snap.snapshot_id = f.snapshot_id
+        WHERE snap.repo_id = $1
+        ORDER BY f.path
+    `, [repo_id]);
+
+    let regex: RegExp;
+    try {
+        regex = new RegExp(pattern, 'gi');
+    } catch {
+        // Fall back to literal string match if regex is invalid
+        regex = new RegExp(pattern.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'), 'gi');
+    }
+
+    const matches: { file: string; line: number; text: string; context: string[] }[] = [];
+
+    for (const row of filesResult.rows as { path: string }[]) {
+        if (matches.length >= max_results) break;
+
+        // Apply file pattern filter
+        if (file_pattern) {
+            const fp = row.path.toLowerCase();
+            const pat = file_pattern.toLowerCase();
+            if (!fp.includes(pat) && !fp.endsWith(pat)) continue;
+        }
+
+        const fullPath = path.resolve(basePath, row.path);
+
+        // Path safety
+        try {
+            const realBase = fs.realpathSync(basePath);
+            if (!fullPath.startsWith(realBase + path.sep)) continue;
+        } catch { continue; }
+
+        try {
+            const content = fs.readFileSync(fullPath, 'utf-8');
+            const lines = content.split('\n');
+
+            for (let i = 0; i < lines.length && matches.length < max_results; i++) {
+                regex.lastIndex = 0;
+                if (regex.test(lines[i]!)) {
+                    const ctxStart = Math.max(0, i - context_lines_count);
+                    const ctxEnd = Math.min(lines.length - 1, i + context_lines_count);
+                    const contextArr: string[] = [];
+                    for (let c = ctxStart; c <= ctxEnd; c++) {
+                        const prefix = c === i ? '>' : ' ';
+                        contextArr.push(`${prefix} ${c + 1}: ${lines[c]}`);
+                    }
+                    matches.push({
+                        file: row.path,
+                        line: i + 1,
+                        text: (lines[i] ?? '').trim(),
+                        context: contextArr,
+                    });
+                }
+            }
+        } catch { continue; }
+    }
+
+    return textResult({
+        pattern,
+        total_matches: matches.length,
+        matches: matches.map(m => ({
+            file: m.file,
+            line: m.line,
+            match: m.text,
+            context: m.context.join('\n'),
+        })),
+    });
+}
+
+// ────────── Tool 25: Codebase Overview ──────────
+//
+// High-level architecture summary with risk assessment. Answers:
+// "What does this codebase look like? Where are the risks?"
+// This is the tool that turns ContextZero from an indexer into an auditor.
+
+export async function handleCodebaseOverview(args: Record<string, unknown>, log: McpLogger): Promise<CallToolResult> {
+    const repo_id = args.repo_id as string;
+    const snapshot_id = args.snapshot_id as string;
+
+    if (!isUUID(repo_id)) return errorResult('repo_id is required and must be a valid UUID');
+    if (!isUUID(snapshot_id)) return errorResult('snapshot_id is required and must be a valid UUID');
+
+    log.debug('scg_codebase_overview', { repo_id, snapshot_id });
+
+    // 1. File structure summary
+    const filesResult = await db.query(`
+        SELECT f.path, f.language FROM files
+        WHERE snapshot_id = $1
+        ORDER BY f.path
+    `, [snapshot_id]);
+    const files = filesResult.rows as { path: string; language: string }[];
+
+    // Group by directory and language
+    const dirCounts: Record<string, number> = {};
+    const langCounts: Record<string, number> = {};
+    for (const f of files) {
+        const dir = f.path.split('/').slice(0, -1).join('/') || '.';
+        dirCounts[dir] = (dirCounts[dir] || 0) + 1;
+        const lang = f.language || 'unknown';
+        langCounts[lang] = (langCounts[lang] || 0) + 1;
+    }
+
+    // 2. Symbol summary — kinds, visibility, complexity indicators
+    const symbolsResult = await db.query(`
+        SELECT s.kind, sv.visibility, sv.summary,
+               s.canonical_name, f.path as file_path,
+               sv.symbol_version_id
+        FROM symbol_versions sv
+        JOIN symbols s ON s.symbol_id = sv.symbol_id
+        JOIN files f ON f.file_id = sv.file_id
+        WHERE sv.snapshot_id = $1
+        ORDER BY s.kind, s.canonical_name
+    `, [snapshot_id]);
+    const symbols = symbolsResult.rows as {
+        kind: string; visibility: string; summary: string;
+        canonical_name: string; file_path: string; symbol_version_id: string;
+    }[];
+
+    const kindCounts: Record<string, number> = {};
+    const publicSymbols: string[] = [];
+    for (const s of symbols) {
+        kindCounts[s.kind] = (kindCounts[s.kind] || 0) + 1;
+        if (s.visibility === 'public') publicSymbols.push(`${s.kind}:${s.canonical_name} (${s.file_path})`);
+    }
+
+    // 3. Behavioral risk — side-effecting and read_write functions
+    const behaviorResult = await db.query(`
+        SELECT bp.purity_class, COUNT(*) as cnt
+        FROM behavioral_profiles bp
+        JOIN symbol_versions sv ON sv.symbol_version_id = bp.symbol_version_id
+        WHERE sv.snapshot_id = $1
+        GROUP BY bp.purity_class
+        ORDER BY bp.purity_class
+    `, [snapshot_id]);
+    const purityDist = Object.fromEntries(
+        (behaviorResult.rows as { purity_class: string; cnt: string }[])
+            .map(r => [r.purity_class, parseInt(r.cnt, 10)])
+    );
+
+    // High-risk symbols: side_effecting with network or DB writes
+    const riskyResult = await db.query(`
+        SELECT s.canonical_name, s.kind, f.path, bp.purity_class,
+               bp.network_calls, bp.db_writes, bp.file_io
+        FROM behavioral_profiles bp
+        JOIN symbol_versions sv ON sv.symbol_version_id = bp.symbol_version_id
+        JOIN symbols s ON s.symbol_id = sv.symbol_id
+        JOIN files f ON f.file_id = sv.file_id
+        WHERE sv.snapshot_id = $1
+        AND bp.purity_class IN ('side_effecting', 'read_write')
+        AND (array_length(bp.network_calls, 1) > 0
+             OR array_length(bp.db_writes, 1) > 0
+             OR array_length(bp.file_io, 1) > 0)
+        ORDER BY bp.purity_class DESC
+        LIMIT 30
+    `, [snapshot_id]);
+    const riskySymbols = (riskyResult.rows as {
+        canonical_name: string; kind: string; path: string;
+        purity_class: string; network_calls: string[]; db_writes: string[]; file_io: string[];
+    }[]).map(r => ({
+        name: r.canonical_name,
+        kind: r.kind,
+        file: r.path,
+        purity: r.purity_class,
+        risks: [
+            ...(r.network_calls || []).map((c: string) => `network:${c}`),
+            ...(r.db_writes || []).map((c: string) => `db_write:${c}`),
+            ...(r.file_io || []).map((c: string) => `file_io:${c}`),
+        ],
+    }));
+
+    // 4. Test coverage
+    const testResult = await db.query(`
+        SELECT COUNT(DISTINCT ta.symbol_version_id) as tested
+        FROM test_artifacts ta
+        JOIN symbol_versions sv ON sv.symbol_version_id = ta.symbol_version_id
+        WHERE sv.snapshot_id = $1
+    `, [snapshot_id]);
+    const testedCount = parseInt((testResult.rows[0] as { tested: string })?.tested || '0', 10);
+
+    // 5. Uncertainty report
+    const uncertainty = await uncertaintyTracker.getSnapshotUncertainty(snapshot_id);
+
+    // 6. Key entry points — exported functions/classes at top-level
+    const entryPoints = publicSymbols.slice(0, 30);
+
+    return textResult({
+        summary: {
+            total_files: files.length,
+            total_symbols: symbols.length,
+            languages: langCounts,
+            directories: Object.entries(dirCounts).sort((a, b) => b[1] - a[1]).slice(0, 20),
+        },
+        symbols: {
+            by_kind: kindCounts,
+            public_api_count: publicSymbols.length,
+            entry_points: entryPoints,
+        },
+        behavioral_profile: {
+            purity_distribution: purityDist,
+            profiled_count: Object.values(purityDist).reduce((a, b) => a + b, 0),
+            high_risk_symbols: riskySymbols,
+        },
+        test_coverage: {
+            symbols_tested: testedCount,
+            symbols_total: symbols.length,
+            coverage_percent: symbols.length > 0 ? ((testedCount / symbols.length) * 100).toFixed(1) + '%' : '0%',
+        },
+        uncertainty: {
+            overall_confidence: uncertainty.overall_confidence,
+            total_annotations: uncertainty.total_annotations,
+            by_source: uncertainty.by_source,
+            most_uncertain: uncertainty.most_uncertain_symbols.slice(0, 10),
+        },
+    });
 }

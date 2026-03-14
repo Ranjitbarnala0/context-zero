@@ -17,6 +17,7 @@
 import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js';
 import { z } from 'zod';
+import { runPendingMigrations } from '../db-driver/migrate';
 import {
     handleResolveSymbol,
     handleGetSymbolDetails,
@@ -40,6 +41,9 @@ import {
     handleListSnapshots,
     handleSnapshotStats,
     handlePersistHomologs,
+    handleReadSource,
+    handleSearchCode,
+    handleCodebaseOverview,
 } from './handlers';
 
 // ────────── MCP-Safe Logger (stderr only) ──────────
@@ -435,10 +439,64 @@ server.registerTool(
     async (args) => safeTool(handlePersistHomologs)(args as unknown as Record<string, unknown>),
 );
 
+// Tool 23: Read Source Code
+server.registerTool(
+    'scg_read_source',
+    {
+        description: 'Read actual source code — by symbol version ID (shows the symbol\'s code with context) or by file path (shows file content). Essential for deep code audits through MCP.',
+        inputSchema: {
+            repo_id: z.string().uuid().describe('Repository UUID'),
+            symbol_version_id: z.string().uuid().optional().describe('Symbol version UUID — reads the symbol\'s source code with line numbers'),
+            file_path: z.string().optional().describe('Relative file path within the repo — reads the file content'),
+            start_line: z.number().int().min(1).optional().describe('Start line (1-indexed). Default: symbol start or file start'),
+            end_line: z.number().int().min(1).optional().describe('End line (1-indexed). Default: symbol end or file end'),
+            context_lines: z.number().int().min(0).max(50).optional().describe('Extra context lines around symbol (default 0, max 50)'),
+        },
+    },
+    async (args) => safeTool(handleReadSource)(args as unknown as Record<string, unknown>),
+);
+
+// Tool 24: Search Code
+server.registerTool(
+    'scg_search_code',
+    {
+        description: 'Search/grep across all indexed files in a repository. Returns matching lines with surrounding context. Supports regex patterns. Essential for finding implementations, usages, and patterns during audits.',
+        inputSchema: {
+            repo_id: z.string().uuid().describe('Repository UUID'),
+            pattern: z.string().describe('Search pattern (regex supported). E.g., "async function train", "class.*Block", "def forward"'),
+            file_pattern: z.string().optional().describe('Filter to files matching this substring. E.g., ".py", "src/model", "test"'),
+            max_results: z.number().int().min(1).max(100).optional().describe('Maximum matches to return (default 30, max 100)'),
+            context_lines: z.number().int().min(0).max(5).optional().describe('Lines of context around each match (default 2, max 5)'),
+        },
+    },
+    async (args) => safeTool(handleSearchCode)(args as unknown as Record<string, unknown>),
+);
+
+// Tool 25: Codebase Overview
+server.registerTool(
+    'scg_codebase_overview',
+    {
+        description: 'High-level architecture summary with risk assessment. Shows: file structure, symbol distribution, behavioral purity profile, test coverage gaps, high-risk symbols (side-effecting, network, DB), and uncertainty analysis. Use this FIRST when auditing an unfamiliar codebase.',
+        inputSchema: {
+            repo_id: z.string().uuid().describe('Repository UUID'),
+            snapshot_id: z.string().uuid().describe('Snapshot UUID'),
+        },
+    },
+    async (args) => safeTool(handleCodebaseOverview)(args as unknown as Record<string, unknown>),
+);
+
 // ────────── Server Startup ──────────
 
 async function main(): Promise<void> {
     log.info('Starting ContextZero MCP bridge', { version: SERVER_VERSION });
+
+    // Run pending migrations before accepting connections
+    try {
+        await runPendingMigrations();
+    } catch (err) {
+        log.error('Migration failed — refusing to start', err);
+        process.exit(1);
+    }
 
     const transport = new StdioServerTransport();
 
@@ -452,7 +510,7 @@ async function main(): Promise<void> {
         log.info('MCP bridge connected and ready', {
             server: SERVER_NAME,
             version: SERVER_VERSION,
-            tools_registered: 22,
+            tools_registered: 25,
         });
     } catch (err: unknown) {
         log.error('Failed to start MCP bridge', err);

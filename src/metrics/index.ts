@@ -87,11 +87,17 @@ export function observeHistogram(name: string, value: number, labels?: Record<st
 
     data.sum += value;
     data.count++;
+    let bucketed = false;
     for (let i = 0; i < data.buckets.length; i++) {
         if (value <= data.buckets[i]!) {
             data.bucketCounts[i]!++;
+            bucketed = true;
             break;  // Only count in the first (smallest) matching bucket
         }
+    }
+    // Values exceeding all bucket boundaries go into the last bucket
+    if (!bucketed && data.buckets.length > 0) {
+        data.bucketCounts[data.buckets.length - 1]!++;
     }
 }
 

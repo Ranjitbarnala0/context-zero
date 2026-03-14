@@ -274,11 +274,13 @@ export class Ingestor {
         // Adapters may return absolute paths (e.g., "/home/user/repo/src/file.ts#Func").
         // The DB stores relative paths ("src/file.ts"). Normalize everything up front.
         const normalizeKey = (key: string): string => {
-            const hashIdx = key.indexOf('#');
-            const filePart = hashIdx >= 0 ? key.substring(0, hashIdx) : key;
+            // Support both "::" and "#" separators for cross-adapter compatibility
+            let sepIdx = key.indexOf('::');
+            if (sepIdx < 0) sepIdx = key.indexOf('#');
+            const filePart = sepIdx >= 0 ? key.substring(0, sepIdx) : key;
             if (path.isAbsolute(filePart)) {
                 const relPart = path.relative(repoPath, filePart);
-                return hashIdx >= 0 ? relPart + key.substring(hashIdx) : relPart;
+                return sepIdx >= 0 ? relPart + key.substring(sepIdx) : relPart;
             }
             return key;
         };
@@ -300,11 +302,16 @@ export class Ingestor {
         const symbolIdToEntry = new Map<string, { svId: string; sym: ExtractedSymbol; symbolId: string }>();
 
         for (const sym of extraction.symbols) {
-            let stableKeyPath = sym.stable_key.split('#')[0] || '';
+            // Stable key format: "filePath::SymbolName" or "filePath#SymbolName"
+            // Support both separators for cross-adapter compatibility
+            let separatorIdx = sym.stable_key.indexOf('::');
+            if (separatorIdx < 0) separatorIdx = sym.stable_key.indexOf('#');
+            let stableKeyPath = separatorIdx >= 0 ? sym.stable_key.substring(0, separatorIdx) : sym.stable_key;
             if (path.isAbsolute(stableKeyPath)) {
                 stableKeyPath = path.relative(repoPath, stableKeyPath);
-                const hashIdx = sym.stable_key.indexOf('#');
-                sym.stable_key = stableKeyPath + (hashIdx >= 0 ? sym.stable_key.substring(hashIdx) : '');
+                sym.stable_key = separatorIdx >= 0
+                    ? stableKeyPath + sym.stable_key.substring(separatorIdx)
+                    : stableKeyPath;
             }
 
             const symbolId = await coreDataService.mergeSymbol({
@@ -350,7 +357,7 @@ export class Ingestor {
                     svId, symbolId, snapshotId, fileId,
                     sym.range_start_line, sym.range_start_col, sym.range_end_line, sym.range_end_col,
                     sym.signature, sym.ast_hash, sym.body_hash, sym.normalized_ast_hash || null,
-                    '', sym.visibility, language,
+                    sym.summary || '', sym.visibility, language,
                     // Only propagate file-level uncertainty flags to symbols.
                     // Function-specific flags (call_extraction_failure, normalization_failure,
                     // type_inference_failure) are per-symbol and should not be broadcast

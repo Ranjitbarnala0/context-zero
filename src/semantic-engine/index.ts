@@ -520,6 +520,33 @@ class SemanticEngine {
     }
 
     /**
+     * Compute body-only similarity between two symbols using MinHash Jaccard.
+     * This gives graduated similarity (0.0–1.0) for function bodies that share
+     * logic but aren't byte-identical — unlike hash comparison which is binary.
+     */
+    async computeBodySimilarity(svIdA: string, svIdB: string): Promise<number> {
+        const [resultA, resultB] = await Promise.all([
+            db.query(
+                `SELECT minhash_signature FROM semantic_vectors WHERE symbol_version_id = $1 AND view_type = 'body'`,
+                [svIdA],
+            ),
+            db.query(
+                `SELECT minhash_signature FROM semantic_vectors WHERE symbol_version_id = $1 AND view_type = 'body'`,
+                [svIdB],
+            ),
+        ]);
+
+        if (resultA.rows.length === 0 || resultB.rows.length === 0) return 0;
+
+        const sigA = resultA.rows[0].minhash_signature as number[];
+        const sigB = resultB.rows[0].minhash_signature as number[];
+
+        if (!sigA || !sigB) return 0;
+
+        return estimateJaccardFromMinHash(sigA, sigB);
+    }
+
+    /**
      * Batch-embed all symbols in a snapshot, then compute IDF.
      * Returns the number of symbols embedded.
      */

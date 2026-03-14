@@ -21,8 +21,8 @@ describe('Homolog Constants', () => {
         expect(MIN_EVIDENCE_FAMILIES).toBe(2);
     });
 
-    test('default confidence threshold is 0.70', () => {
-        expect(DEFAULT_HOMOLOG_CONFIDENCE_THRESHOLD).toBe(0.70);
+    test('default confidence threshold is 0.60', () => {
+        expect(DEFAULT_HOMOLOG_CONFIDENCE_THRESHOLD).toBe(0.60);
     });
 });
 

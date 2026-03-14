@@ -43,6 +43,7 @@ import {
 } from '../middleware/validation';
 import type { CapsuleMode, ValidationMode } from '../types';
 import { renderMetrics, metricsMiddleware, setGauge } from '../metrics';
+import { runPendingMigrations } from '../db-driver/migrate';
 
 const log = new Logger('mcp-interface');
 const app = express();
@@ -98,6 +99,13 @@ const JSON_DEFAULT = express.json({ limit: '1mb' });
 // via JSON_INGEST, JSON_PATCH, JSON_QUERY, or JSON_DEFAULT as the first
 // route middleware. A global parser would silently cap all routes at its limit.
 
+// ────────── Security Headers ──────────
+app.use((_req: Request, res: Response, next: NextFunction) => {
+    res.setHeader('X-Content-Type-Options', 'nosniff');
+    res.setHeader('X-Frame-Options', 'DENY');
+    next();
+});
+
 app.use(authMiddleware);
 app.use(rateLimitMiddleware);
 app.use(metricsMiddleware);
@@ -106,7 +114,9 @@ app.use(metricsMiddleware);
 // Extracts X-Request-ID from incoming request headers or generates a UUID.
 // Stored on req.correlationId for use by downstream handlers and error responses.
 app.use((req: Request, _res: Response, next: NextFunction) => {
-    const correlationId = (req.headers['x-request-id'] as string) || crypto.randomUUID();
+    let correlationId = (req.headers['x-request-id'] as string) || crypto.randomUUID();
+    // Cap length to prevent log bloat from malicious headers
+    if (correlationId.length > 128) correlationId = correlationId.substring(0, 128);
     req.correlationId = correlationId;
     next();
 });
@@ -827,23 +837,263 @@ app.post('/scg_persist_homologs',
     })
 );
 
+// ────────── Tool 23: Read Source Code ──────────
+
+app.post('/scg_read_source',
+    JSON_QUERY,
+    validateBody({
+        repo_id: requireUUID,
+        symbol_version_id: optionalUUID,
+        file_path: optionalString,
+        start_line: requireBoundedInt(1, 100_000),
+        end_line: requireBoundedInt(1, 100_000),
+        context_lines: requireBoundedInt(0, 50),
+    }),
+    safeHandler(async (req, res) => {
+        const { repo_id, symbol_version_id, file_path: reqFilePath, start_line, end_line, context_lines = 0 } = req.body;
+
+        if (!symbol_version_id && !reqFilePath) {
+            res.status(400).json({ error: 'Either symbol_version_id or file_path is required' });
+            return;
+        }
+
+        const repo = await coreDataService.getRepository(repo_id);
+        if (!repo) { res.status(404).json({ error: 'Repository not found' }); return; }
+        const basePath = repo.base_path as string;
+        if (!basePath) { res.status(400).json({ error: 'Repository base path not configured' }); return; }
+
+        let resolvedPath: string;
+        let rangeStart = start_line as number | undefined;
+        let rangeEnd = end_line as number | undefined;
+        let symbolMeta: Record<string, unknown> | null = null;
+
+        if (symbol_version_id) {
+            const svResult = await db.query(`
+                SELECT sv.range_start_line, sv.range_end_line, sv.signature, sv.summary,
+                       s.canonical_name, s.kind, f.path as file_path
+                FROM symbol_versions sv
+                JOIN symbols s ON s.symbol_id = sv.symbol_id
+                JOIN files f ON f.file_id = sv.file_id
+                WHERE sv.symbol_version_id = $1
+            `, [symbol_version_id]);
+            if (svResult.rows.length === 0) { res.status(404).json({ error: 'Symbol version not found' }); return; }
+            const sv = svResult.rows[0] as Record<string, unknown>;
+            resolvedPath = path.resolve(basePath, sv.file_path as string);
+            rangeStart = rangeStart ?? (sv.range_start_line as number) - context_lines;
+            rangeEnd = rangeEnd ?? (sv.range_end_line as number) + context_lines;
+            symbolMeta = { canonical_name: sv.canonical_name, kind: sv.kind, signature: sv.signature, summary: sv.summary, file_path: sv.file_path };
+        } else {
+            resolvedPath = path.resolve(basePath, reqFilePath);
+        }
+
+        const realBase = fs.realpathSync(basePath);
+        if (!resolvedPath.startsWith(realBase + path.sep) && resolvedPath !== realBase) {
+            res.status(403).json({ error: 'Path traversal blocked' }); return;
+        }
+
+        try {
+            const content = fs.readFileSync(resolvedPath, 'utf-8');
+            const lines = content.split('\n');
+            let outputLines: string[];
+            if (rangeStart && rangeEnd) {
+                const s = Math.max(1, rangeStart);
+                const e = Math.min(lines.length, rangeEnd);
+                outputLines = lines.slice(s - 1, e).map((line, i) => `${s + i}: ${line}`);
+            } else {
+                const cap = Math.min(lines.length, 500);
+                outputLines = lines.slice(0, cap).map((line, i) => `${i + 1}: ${line}`);
+                if (lines.length > 500) outputLines.push(`... (${lines.length - 500} more lines truncated)`);
+            }
+            res.json({ ...(symbolMeta ? { symbol: symbolMeta } : {}), total_lines: lines.length, source: outputLines.join('\n') });
+        } catch {
+            res.status(404).json({ error: 'File not readable' });
+        }
+    })
+);
+
+// ────────── Tool 24: Search Code ──────────
+
+app.post('/scg_search_code',
+    JSON_QUERY,
+    validateBody({
+        repo_id: requireUUID,
+        pattern: requireString,
+        file_pattern: optionalString,
+        max_results: requireBoundedInt(1, 100),
+        context_lines: requireBoundedInt(0, 5),
+    }),
+    safeHandler(async (req, res) => {
+        const { repo_id, pattern, file_pattern, max_results = 30, context_lines: ctxLines = 2 } = req.body;
+
+        const repo = await coreDataService.getRepository(repo_id);
+        if (!repo) { res.status(404).json({ error: 'Repository not found' }); return; }
+        const basePath = repo.base_path as string;
+        if (!basePath) { res.status(400).json({ error: 'Repository base path not configured' }); return; }
+
+        const filesResult = await db.query(`
+            SELECT DISTINCT f.path FROM files f
+            JOIN snapshots snap ON snap.snapshot_id = f.snapshot_id
+            WHERE snap.repo_id = $1 ORDER BY f.path
+        `, [repo_id]);
+
+        let regex: RegExp;
+        try { regex = new RegExp(pattern, 'gi'); }
+        catch { regex = new RegExp(pattern.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'), 'gi'); }
+
+        const matches: { file: string; line: number; match: string; context: string }[] = [];
+        const realBase = fs.realpathSync(basePath);
+
+        for (const row of filesResult.rows as { path: string }[]) {
+            if (matches.length >= max_results) break;
+            if (file_pattern && !row.path.toLowerCase().includes(file_pattern.toLowerCase())) continue;
+
+            const fullPath = path.resolve(basePath, row.path);
+            if (!fullPath.startsWith(realBase + path.sep)) continue;
+
+            try {
+                const content = fs.readFileSync(fullPath, 'utf-8');
+                const lines = content.split('\n');
+                for (let i = 0; i < lines.length && matches.length < max_results; i++) {
+                    regex.lastIndex = 0;
+                    if (regex.test(lines[i]!)) {
+                        const ctxStart = Math.max(0, i - ctxLines);
+                        const ctxEnd = Math.min(lines.length - 1, i + ctxLines);
+                        const contextArr: string[] = [];
+                        for (let c = ctxStart; c <= ctxEnd; c++) {
+                            contextArr.push(`${c === i ? '>' : ' '} ${c + 1}: ${lines[c]}`);
+                        }
+                        matches.push({ file: row.path, line: i + 1, match: (lines[i] ?? '').trim(), context: contextArr.join('\n') });
+                    }
+                }
+            } catch { continue; }
+        }
+
+        res.json({ pattern, total_matches: matches.length, matches });
+    })
+);
+
+// ────────── Tool 25: Codebase Overview ──────────
+
+app.post('/scg_codebase_overview',
+    JSON_QUERY,
+    validateBody({
+        repo_id: requireUUID,
+        snapshot_id: requireUUID,
+    }),
+    safeHandler(async (req, res) => {
+        const { repo_id, snapshot_id } = req.body;
+
+        // File structure
+        const filesResult = await db.query(`SELECT path, language FROM files WHERE snapshot_id = $1 ORDER BY path`, [snapshot_id]);
+        const files = filesResult.rows as { path: string; language: string }[];
+        const dirCounts: Record<string, number> = {};
+        const langCounts: Record<string, number> = {};
+        for (const f of files) {
+            const dir = f.path.split('/').slice(0, -1).join('/') || '.';
+            dirCounts[dir] = (dirCounts[dir] || 0) + 1;
+            langCounts[f.language || 'unknown'] = (langCounts[f.language || 'unknown'] || 0) + 1;
+        }
+
+        // Symbols
+        const symbolsResult = await db.query(`
+            SELECT s.kind, sv.visibility, s.canonical_name, f.path as file_path
+            FROM symbol_versions sv JOIN symbols s ON s.symbol_id = sv.symbol_id JOIN files f ON f.file_id = sv.file_id
+            WHERE sv.snapshot_id = $1 ORDER BY s.kind, s.canonical_name
+        `, [snapshot_id]);
+        const symbols = symbolsResult.rows as { kind: string; visibility: string; canonical_name: string; file_path: string }[];
+        const kindCounts: Record<string, number> = {};
+        const publicSymbols: string[] = [];
+        for (const s of symbols) {
+            kindCounts[s.kind] = (kindCounts[s.kind] || 0) + 1;
+            if (s.visibility === 'public') publicSymbols.push(`${s.kind}:${s.canonical_name} (${s.file_path})`);
+        }
+
+        // Behavioral profile
+        const behaviorResult = await db.query(`
+            SELECT bp.purity_class, COUNT(*) as cnt FROM behavioral_profiles bp
+            JOIN symbol_versions sv ON sv.symbol_version_id = bp.symbol_version_id
+            WHERE sv.snapshot_id = $1 GROUP BY bp.purity_class
+        `, [snapshot_id]);
+        const purityDist = Object.fromEntries(
+            (behaviorResult.rows as { purity_class: string; cnt: string }[]).map(r => [r.purity_class, parseInt(r.cnt, 10)])
+        );
+
+        // High-risk symbols
+        const riskyResult = await db.query(`
+            SELECT s.canonical_name, s.kind, f.path, bp.purity_class, bp.network_calls, bp.db_writes, bp.file_io
+            FROM behavioral_profiles bp JOIN symbol_versions sv ON sv.symbol_version_id = bp.symbol_version_id
+            JOIN symbols s ON s.symbol_id = sv.symbol_id JOIN files f ON f.file_id = sv.file_id
+            WHERE sv.snapshot_id = $1 AND bp.purity_class IN ('side_effecting','read_write')
+            AND (array_length(bp.network_calls,1)>0 OR array_length(bp.db_writes,1)>0 OR array_length(bp.file_io,1)>0)
+            LIMIT 30
+        `, [snapshot_id]);
+
+        // Test coverage
+        const testResult = await db.query(`
+            SELECT COUNT(DISTINCT ta.symbol_version_id) as tested FROM test_artifacts ta
+            JOIN symbol_versions sv ON sv.symbol_version_id = ta.symbol_version_id WHERE sv.snapshot_id = $1
+        `, [snapshot_id]);
+        const testedCount = parseInt((testResult.rows[0] as { tested: string })?.tested || '0', 10);
+
+        // Uncertainty
+        const uncertainty = await uncertaintyTracker.getSnapshotUncertainty(snapshot_id);
+
+        res.json({
+            summary: { total_files: files.length, total_symbols: symbols.length, languages: langCounts,
+                       directories: Object.entries(dirCounts).sort((a, b) => b[1] - a[1]).slice(0, 20) },
+            symbols: { by_kind: kindCounts, public_api_count: publicSymbols.length, entry_points: publicSymbols.slice(0, 30) },
+            behavioral_profile: { purity_distribution: purityDist, high_risk_symbols: (riskyResult.rows as Record<string, unknown>[]).map(r => ({
+                name: r.canonical_name, kind: r.kind, file: r.path, purity: r.purity_class,
+                risks: [...((r.network_calls as string[]) || []).map(c => `network:${c}`),
+                        ...((r.db_writes as string[]) || []).map(c => `db_write:${c}`),
+                        ...((r.file_io as string[]) || []).map(c => `file_io:${c}`)],
+            })) },
+            test_coverage: { symbols_tested: testedCount, symbols_total: symbols.length,
+                           coverage_percent: symbols.length > 0 ? ((testedCount / symbols.length) * 100).toFixed(1) + '%' : '0%' },
+            uncertainty: { overall_confidence: uncertainty.overall_confidence, total_annotations: uncertainty.total_annotations,
+                         by_source: uncertainty.by_source, most_uncertain: uncertainty.most_uncertain_symbols.slice(0, 10) },
+        });
+    })
+);
+
 // ────────── Server Start ──────────
 
 const PORT = parseInt(process.env['SCG_PORT'] || '3100', 10);
 const HOST = process.env['SCG_HOST'] || '0.0.0.0';
 
-const server = app.listen(PORT, HOST, () => {
-    log.info('ContextZero API interface started', {
-        host: HOST,
-        port: PORT,
-        allowed_base_paths: ALLOWED_BASE_PATHS.length > 0 ? ALLOWED_BASE_PATHS : ['NONE — repos will be rejected'],
-        cors_origins: CORS_ORIGINS.length > 0 ? CORS_ORIGINS : ['NONE — all origins rejected'],
+let server: ReturnType<typeof app.listen>;
+
+async function startServer(): Promise<void> {
+    // Run pending migrations before accepting traffic
+    try {
+        await runPendingMigrations();
+    } catch (err) {
+        log.fatal('Migration failed — refusing to start', err instanceof Error ? err : new Error(String(err)));
+        process.exit(1);
+    }
+
+    server = app.listen(PORT, HOST, () => {
+        log.info('ContextZero API interface started', {
+            host: HOST,
+            port: PORT,
+            allowed_base_paths: ALLOWED_BASE_PATHS.length > 0 ? ALLOWED_BASE_PATHS : ['NONE — repos will be rejected'],
+            cors_origins: CORS_ORIGINS.length > 0 ? CORS_ORIGINS : ['NONE — all origins rejected'],
+        });
     });
+}
+
+startServer().catch((err) => {
+    log.fatal('Failed to start server', err instanceof Error ? err : new Error(String(err)));
+    process.exit(1);
 });
 
 // Graceful shutdown
 function shutdown(signal: string): void {
     log.info(`Received ${signal}, shutting down gracefully`);
+    if (!server) {
+        process.exit(0);
+        return;
+    }
     server.close(async () => {
         await db.close();
         log.info('Server closed');

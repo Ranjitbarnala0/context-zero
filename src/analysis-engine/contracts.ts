@@ -186,14 +186,14 @@ export class ContractEngine {
             // express invariants about error conditions
             if (bp?.exception_profile) {
                 const arr = Array.isArray(bp.exception_profile) ? bp.exception_profile : [];
-                const throwPatterns = arr.filter((e: string) => e.startsWith('throws:'));
+                const throwPatterns = arr.filter((e: unknown) => typeof e === 'string' && e.startsWith('throws:'));
                 if (throwPatterns.length > 0) {
                     statements.push({
                         text: `INSERT INTO invariants (invariant_id, repo_id, scope_symbol_id, scope_level, expression, source_type, strength, validation_method, last_verified_snapshot_id)
                                VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
                                ON CONFLICT DO NOTHING`,
                         params: [uuidv4(), repoId, sv.symbol_id, 'symbol',
-                            `exception:${sv.canonical_name} raises ${throwPatterns.map((t: string) => t.replace('throws:', '')).join(', ')}`,
+                            `exception:${sv.canonical_name} raises ${throwPatterns.map((t: unknown) => String(t).replace('throws:', '')).join(', ')}`,
                             'derived', 0.80, 'behavioral_inference', snapshotId],
                     });
                     count++;
@@ -286,7 +286,7 @@ export class ContractEngine {
             `SELECT * FROM contract_profiles WHERE symbol_version_id = $1`,
             [symbolVersionId]
         );
-        return result.rows[0] as ContractProfile ?? null;
+        return (result.rows[0] as ContractProfile | undefined) ?? null;
     }
 
     /**

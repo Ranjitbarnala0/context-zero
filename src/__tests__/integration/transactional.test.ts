@@ -236,6 +236,11 @@ describe('Transactional Integration — Engine State Machine', () => {
             rows: [makeTransactionRow('patched')],
             rowCount: 1,
         });
+        // getRepoBasePath
+        mockQuery.mockResolvedValueOnce({
+            rows: [{ base_path: '/tmp/test-repo' }],
+            rowCount: 1,
+        });
         // SELECT backups
         mockQuery.mockResolvedValueOnce({
             rows: [],
@@ -258,6 +263,11 @@ describe('Transactional Integration — Engine State Machine', () => {
         // loadTransaction
         mockQuery.mockResolvedValueOnce({
             rows: [makeTransactionRow('committed')],
+            rowCount: 1,
+        });
+        // getRepoBasePath
+        mockQuery.mockResolvedValueOnce({
+            rows: [{ base_path: '/tmp/test-repo' }],
             rowCount: 1,
         });
         // SELECT backups

@@ -173,7 +173,7 @@ export class BehavioralEngine {
             `SELECT * FROM behavioral_profiles WHERE symbol_version_id = $1`,
             [symbolVersionId]
         );
-        return result.rows[0] as BehavioralProfile ?? null;
+        return (result.rows[0] as BehavioralProfile | undefined) ?? null;
     }
 
     /**
@@ -248,7 +248,7 @@ export class BehavioralEngine {
 
         // Fixed-point iteration: propagate callee effects to callers
         // Max iterations = call graph depth (bounded to prevent infinite loops)
-        let updated = 0;
+        const changedSvIds = new Set<string>();
         const MAX_ITERATIONS = 10;
 
         for (let iteration = 0; iteration < MAX_ITERATIONS; iteration++) {
@@ -270,6 +270,7 @@ export class BehavioralEngine {
                     if (calleeLevel > callerLevel) {
                         callerProfile.purity_class = calleeProfile.purity_class;
                         changed = true;
+                        changedSvIds.add(callerId);
                     }
 
                     // Merge callee's resource touches into caller
@@ -284,22 +285,29 @@ export class BehavioralEngine {
                         return merged;
                     };
 
-                    if (mergeUnique(callerProfile.resource_touches, calleeProfile.resource_touches)) changed = true;
-                    if (mergeUnique(callerProfile.db_reads, calleeProfile.db_reads)) changed = true;
-                    if (mergeUnique(callerProfile.db_writes, calleeProfile.db_writes)) changed = true;
-                    if (mergeUnique(callerProfile.network_calls, calleeProfile.network_calls)) changed = true;
-                    if (mergeUnique(callerProfile.file_io, calleeProfile.file_io)) changed = true;
-                    if (mergeUnique(callerProfile.state_mutation_profile, calleeProfile.state_mutation_profile)) changed = true;
-                    if (mergeUnique(callerProfile.transaction_profile, calleeProfile.transaction_profile)) changed = true;
+                    let resourcesChanged = false;
+                    if (mergeUnique(callerProfile.resource_touches, calleeProfile.resource_touches)) resourcesChanged = true;
+                    if (mergeUnique(callerProfile.db_reads, calleeProfile.db_reads)) resourcesChanged = true;
+                    if (mergeUnique(callerProfile.db_writes, calleeProfile.db_writes)) resourcesChanged = true;
+                    if (mergeUnique(callerProfile.network_calls, calleeProfile.network_calls)) resourcesChanged = true;
+                    if (mergeUnique(callerProfile.file_io, calleeProfile.file_io)) resourcesChanged = true;
+                    if (mergeUnique(callerProfile.state_mutation_profile, calleeProfile.state_mutation_profile)) resourcesChanged = true;
+                    if (mergeUnique(callerProfile.transaction_profile, calleeProfile.transaction_profile)) resourcesChanged = true;
+                    if (resourcesChanged) {
+                        changed = true;
+                        changedSvIds.add(callerId);
+                    }
                 }
             }
 
             if (!changed) break;
         }
 
-        // Persist updated profiles back to DB
+        // Persist only changed profiles back to DB
         const statements: { text: string; params: unknown[] }[] = [];
-        for (const [svId, profile] of profiles) {
+        for (const svId of changedSvIds) {
+            const profile = profiles.get(svId);
+            if (!profile) continue;
             statements.push({
                 text: `UPDATE behavioral_profiles SET
                     purity_class = $1,
@@ -323,15 +331,14 @@ export class BehavioralEngine {
                     svId,
                 ],
             });
-            updated++;
         }
 
         if (statements.length > 0) {
             await db.batchInsert(statements);
         }
 
-        timer({ profiles_propagated: updated });
-        return updated;
+        timer({ profiles_propagated: changedSvIds.size });
+        return changedSvIds.size;
     }
 
     /**
@@ -359,11 +366,13 @@ export class BehavioralEngine {
         const newResources = after.resource_touches.filter(r => !beforeResources.has(r));
         const removedResources = before.resource_touches.filter(r => !afterResources.has(r));
 
+        const arraysEqual = (a: string[], b: string[]): boolean =>
+            a.length === b.length && [...a].sort().join(',') === [...b].sort().join(',');
         const sideEffectsChanged =
-            before.network_calls.join(',') !== after.network_calls.join(',') ||
-            before.db_writes.join(',') !== after.db_writes.join(',') ||
-            before.file_io.join(',') !== after.file_io.join(',') ||
-            before.transaction_profile.join(',') !== after.transaction_profile.join(',');
+            !arraysEqual(before.network_calls, after.network_calls) ||
+            !arraysEqual(before.db_writes, after.db_writes) ||
+            !arraysEqual(before.file_io, after.file_io) ||
+            !arraysEqual(before.transaction_profile, after.transaction_profile);
 
         return {
             purityChanged: beforeLevel !== afterLevel,

@@ -139,7 +139,7 @@ export class CoreDataService {
 
     public async getRepository(repo_id: string): Promise<Record<string, unknown> | null> {
         const result = await db.query(`SELECT * FROM repositories WHERE repo_id = $1`, [repo_id]);
-        return result.rows[0] as Record<string, unknown> ?? null;
+        return (result.rows[0] as Record<string, unknown> | undefined) ?? null;
     }
 
     public async createSnapshot(input: SnapshotInput): Promise<string> {
@@ -160,7 +160,7 @@ export class CoreDataService {
 
     public async getSnapshot(snapshot_id: string): Promise<Record<string, unknown> | null> {
         const result = await db.query(`SELECT * FROM snapshots WHERE snapshot_id = $1`, [snapshot_id]);
-        return result.rows[0] as Record<string, unknown> ?? null;
+        return (result.rows[0] as Record<string, unknown> | undefined) ?? null;
     }
 
     public async updateSnapshotStatus(snapshot_id: string, status: IndexStatus): Promise<void> {
@@ -353,7 +353,7 @@ export class CoreDataService {
 
     public async getFilePath(file_id: string): Promise<string | null> {
         const result = await db.query(`SELECT path FROM files WHERE file_id = $1`, [file_id]);
-        return result.rows[0]?.path as string ?? null;
+        return (result.rows[0]?.path as string | undefined) ?? null;
     }
 
     public async insertTestArtifact(artifact: {

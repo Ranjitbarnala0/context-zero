@@ -101,6 +101,9 @@ export function computeIDF(
     documentTokenSets: Set<string>[],
     totalDocs: number,
 ): Record<string, number> {
+    // Guard: no documents → no IDF scores
+    if (totalDocs <= 0) return {};
+
     // Count how many documents contain each token
     const docFreq: Record<string, number> = {};
     for (const tokenSet of documentTokenSets) {

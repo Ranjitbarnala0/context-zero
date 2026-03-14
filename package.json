@@ -7,7 +7,7 @@
     "node": ">=20.0.0"
   },
   "scripts": {
-    "build": "tsc",
+    "build": "tsc && cp -r src/adapters/py dist/adapters/py",
     "start": "node dist/mcp-interface/index.js",
     "dev": "ts-node src/mcp-interface/index.ts",
     "typecheck": "tsc --noEmit",

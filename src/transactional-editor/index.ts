@@ -365,24 +365,43 @@ export class TransactionalChangeEngine {
         const txn = await this.loadTransaction(txnId);
         if (!txn) throw new Error(`Transaction not found: ${txnId}`);
 
+        // Resolve repo base path for path validation during rollback
+        let realBase: string | null = null;
+        try {
+            const repoBasePath = await this.getRepoBasePath(txnId);
+            realBase = fs.realpathSync(path.resolve(repoBasePath));
+        } catch {
+            log.warn('Could not resolve repo base path for rollback path validation — skipping file restoration', { txnId });
+        }
+
         // Restore file backups from database
         const backupResult = await db.query(
             `SELECT file_path, original_content FROM transaction_file_backups WHERE txn_id = $1`,
             [txnId]
         );
 
-        for (const backup of backupResult.rows as { file_path: string; original_content: string | null }[]) {
-            try {
-                if (backup.original_content === null) {
-                    // File was newly created — remove it
-                    if (fs.existsSync(backup.file_path)) {
-                        fs.unlinkSync(backup.file_path);
+        if (realBase) {
+            for (const backup of backupResult.rows as { file_path: string; original_content: string | null }[]) {
+                try {
+                    // Validate path from DB before any filesystem operation — defense against
+                    // DB compromise or corruption injecting paths outside the repo directory
+                    const resolvedBackupPath = path.resolve(backup.file_path);
+                    if (!resolvedBackupPath.startsWith(realBase + path.sep) && resolvedBackupPath !== realBase) {
+                        log.error('Rollback path traversal blocked — skipping', undefined, { filePath: backup.file_path });
+                        continue;
                     }
-                } else {
-                    fs.writeFileSync(backup.file_path, backup.original_content, 'utf-8');
+
+                    if (backup.original_content === null) {
+                        // File was newly created — remove it
+                        if (fs.existsSync(resolvedBackupPath)) {
+                            fs.unlinkSync(resolvedBackupPath);
+                        }
+                    } else {
+                        fs.writeFileSync(resolvedBackupPath, backup.original_content, 'utf-8');
+                    }
+                } catch (err) {
+                    log.error('Failed to restore backup', err, { filePath: backup.file_path });
                 }
-            } catch (err) {
-                log.error('Failed to restore backup', err, { filePath: backup.file_path });
             }
         }
 
@@ -707,7 +726,7 @@ export class TransactionalChangeEngine {
             `SELECT * FROM change_transactions WHERE txn_id = $1`,
             [txnId]
         );
-        return result.rows[0] as ChangeTransaction ?? null;
+        return (result.rows[0] as ChangeTransaction | undefined) ?? null;
     }
 
     private assertTransition(currentState: TransactionState, targetState: TransactionState): void {

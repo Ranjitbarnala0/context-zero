@@ -19,6 +19,7 @@ class DatabaseDriver {
 
     private constructor() {
         const maxConnections = parseInt(process.env['DB_MAX_CONNECTIONS'] || '20', 10);
+        const statementTimeoutMs = parseInt(process.env['DB_STATEMENT_TIMEOUT_MS'] || '0', 10);
         this.pool = new Pool({
             host: process.env['DB_HOST'] || 'localhost',
             port: parseInt(process.env['DB_PORT'] || '5432', 10),
@@ -28,6 +29,8 @@ class DatabaseDriver {
             max: maxConnections,
             idleTimeoutMillis: parseInt(process.env['DB_IDLE_TIMEOUT_MS'] || '30000', 10),
             connectionTimeoutMillis: parseInt(process.env['DB_CONNECTION_TIMEOUT_MS'] || '5000', 10),
+            // Kill runaway queries after this many ms (0 = no limit)
+            statement_timeout: statementTimeoutMs || undefined,
         });
 
         this.pool.on('error', (err: Error) => {

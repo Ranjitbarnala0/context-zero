@@ -32,11 +32,11 @@ describe('Type System Integrity', () => {
     });
 
     test('HOMOLOG_WEIGHTS matches blueprint values exactly', () => {
-        expect(HOMOLOG_WEIGHTS.semantic_intent_similarity).toBe(0.20);
-        expect(HOMOLOG_WEIGHTS.normalized_logic_similarity).toBe(0.20);
+        expect(HOMOLOG_WEIGHTS.semantic_intent_similarity).toBe(0.25);
+        expect(HOMOLOG_WEIGHTS.normalized_logic_similarity).toBe(0.15);
         expect(HOMOLOG_WEIGHTS.signature_type_similarity).toBe(0.15);
-        expect(HOMOLOG_WEIGHTS.behavioral_overlap).toBe(0.15);
-        expect(HOMOLOG_WEIGHTS.contract_overlap).toBe(0.15);
+        expect(HOMOLOG_WEIGHTS.behavioral_overlap).toBe(0.20);
+        expect(HOMOLOG_WEIGHTS.contract_overlap).toBe(0.10);
         expect(HOMOLOG_WEIGHTS.test_overlap).toBe(0.10);
         expect(HOMOLOG_WEIGHTS.history_co_change).toBe(0.05);
     });

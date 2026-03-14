@@ -244,6 +244,85 @@ function extractCppDeclaratorName(node: any): string | null {
     return node.text?.trim() || null;
 }
 
+// ---------------------------------------------------------------------------
+// Leading-comment extraction (for symbol summaries)
+// ---------------------------------------------------------------------------
+
+const COMMENT_NODE_TYPES = new Set(['comment', 'line_comment', 'block_comment']);
+
+/**
+ * Walk backwards from a node to collect leading comment text.
+ * Handles JSDoc/Doxygen/Python docstring-style comments that immediately
+ * precede a declaration.
+ */
+function extractLeadingComment(node: any, source: string): string | undefined {
+    // Strategy 1: previousNamedSibling — works for most tree-sitter grammars
+    let sibling = node.previousNamedSibling;
+
+    // If the node is inside an export_statement, check the export's previous sibling
+    if (!sibling && node.parent?.type === 'export_statement') {
+        sibling = node.parent.previousNamedSibling;
+    }
+
+    if (sibling && COMMENT_NODE_TYPES.has(sibling.type)) {
+        return cleanCommentText(sibling.text);
+    }
+
+    // Strategy 2: scan backwards in source from node start for comment block
+    const startByte = node.parent?.type === 'export_statement'
+        ? node.parent.startIndex
+        : node.startIndex;
+    const preceding = source.slice(Math.max(0, startByte - 2048), startByte);
+    const trimmed = preceding.trimEnd();
+    if (!trimmed) return undefined;
+
+    // Match block comment ending right before the node
+    const blockMatch = trimmed.match(/\/\*\*?([\s\S]*?)\*\/\s*$/);
+    if (blockMatch) return cleanCommentText(blockMatch[0]);
+
+    // Match consecutive line comments ending right before the node
+    const lines = trimmed.split('\n');
+    const commentLines: string[] = [];
+    for (let i = lines.length - 1; i >= 0; i--) {
+        const line = (lines[i] ?? '').trim();
+        if (line.startsWith('//') || line.startsWith('#')) {
+            commentLines.unshift(line);
+        } else if (line === '') {
+            // Allow one blank line between comment block and declaration
+            if (commentLines.length > 0) break;
+        } else {
+            break;
+        }
+    }
+    if (commentLines.length > 0) return cleanCommentText(commentLines.join('\n'));
+
+    return undefined;
+}
+
+/**
+ * Strip comment delimiters and leading asterisks, collapse to a clean summary.
+ */
+function cleanCommentText(raw: string): string | undefined {
+    let text = raw
+        .replace(/^\/\*\*?\s*/, '')   // opening /* or /**
+        .replace(/\*\/\s*$/, '')       // closing */
+        .replace(/^\/\/\s?/gm, '')     // line comment markers
+        .replace(/^#\s?/gm, '')        // Python comment markers
+        .replace(/^\s*\*\s?/gm, '');   // leading * in block comments
+
+    text = text.trim();
+    if (!text) return undefined;
+
+    // Take first paragraph only (before first blank line)
+    const firstParagraph = text.split(/\n\s*\n/)[0];
+    if (firstParagraph) text = firstParagraph.trim();
+
+    // Cap at 512 chars to avoid storing huge comments
+    if (text.length > 512) text = text.slice(0, 509) + '...';
+
+    return text || undefined;
+}
+
 /**
  * Build a stable key from file path, optional parent name, and symbol name.
  * Format: "filePath::Parent.name" or "filePath::name"
@@ -1428,6 +1507,7 @@ function walkNode(
                     ast_hash: sha256(sExpr),
                     body_hash: sha256(fullText),
                     normalized_ast_hash: computeNormalizedAstHash(fullText),
+                    summary: extractLeadingComment(node, ctx.source),
                     visibility,
                 });
 
@@ -1756,6 +1836,7 @@ function emitSymbol(
         ast_hash: sha256(sExpr),
         body_hash: sha256(fullText),
         normalized_ast_hash: computeNormalizedAstHash(fullText),
+        summary: extractLeadingComment(node, ctx.source),
         visibility,
     });
 

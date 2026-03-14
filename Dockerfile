@@ -53,4 +53,5 @@ EXPOSE 3100
 HEALTHCHECK --interval=30s --timeout=5s --retries=3 \
     CMD curl -sf http://localhost:3100/health || exit 1
 
+# The server runs pending migrations automatically on startup (fail-fast if they fail).
 CMD ["node", "dist/mcp-interface/index.js"]
