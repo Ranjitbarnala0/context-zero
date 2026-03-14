@@ -307,11 +307,12 @@ export class Ingestor {
 
         // Phase 3: Process behavior and contract hints (requires svIds from batch)
         for (const { svId, sym } of svEntries) {
-            // Process behavior hints for this symbol
+            // Process behavior hints for this symbol.
+            // Always create a profile — even for symbols with zero hints.
+            // A pure function with empty arrays IS its behavioral profile.
+            // Skipping this would cause "profile not found" for pure functions.
             const symHints = extraction.behavior_hints.filter(h => h.symbol_key === sym.stable_key);
-            if (symHints.length > 0) {
-                await behavioralEngine.extractBehavioralProfiles(svId, symHints);
-            }
+            await behavioralEngine.extractBehavioralProfiles(svId, symHints);
 
             // Process contract hints for this symbol
             const symContracts = extraction.contract_hints.filter(h => h.symbol_key === sym.stable_key);
