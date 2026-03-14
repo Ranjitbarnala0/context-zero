@@ -223,6 +223,27 @@ export class ContractEngine {
             await db.batchInsert(statements);
         }
 
+        // BUG-011 fix: Update derived_invariants_count on contract profiles.
+        // After mining, count actual invariants per symbol and update the
+        // contract_profiles table so the count reflects reality.
+        if (count > 0) {
+            await db.query(`
+                UPDATE contract_profiles cp
+                SET derived_invariants_count = sub.cnt
+                FROM (
+                    SELECT i.scope_symbol_id, COUNT(*) as cnt
+                    FROM invariants i
+                    WHERE i.repo_id = $1
+                    AND i.scope_symbol_id IS NOT NULL
+                    GROUP BY i.scope_symbol_id
+                ) sub
+                JOIN symbol_versions sv ON sv.symbol_id = sub.scope_symbol_id
+                WHERE cp.symbol_version_id = sv.symbol_version_id
+                AND sv.snapshot_id = $2
+            `, [repoId, snapshotId]);
+            log.info('Updated derived_invariants_count on contract profiles', { repoId, snapshotId });
+        }
+
         timer({ invariants_mined: count });
         return count;
     }

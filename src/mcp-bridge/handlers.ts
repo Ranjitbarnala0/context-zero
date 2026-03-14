@@ -546,6 +546,17 @@ export async function handleSnapshotStats(args: Record<string, unknown>, log: Mc
 
     log.debug('scg_snapshot_stats', { snapshot_id });
 
+    // BUG-001 fix: Check if the snapshot actually exists and has data.
+    // Ghost snapshots (orphaned after re-ingestion) return empty results
+    // instead of an error, which silently misleads clients.
+    const snapshotCheck = await db.query(
+        `SELECT snapshot_id, index_status FROM snapshots WHERE snapshot_id = $1`,
+        [snapshot_id],
+    );
+    if (snapshotCheck.rows.length === 0) {
+        return errorResult(`Snapshot not found: ${snapshot_id}`);
+    }
+
     const [fileCount, symbolCount, relationCount, uncertaintyReport] = await Promise.all([
         db.query(`SELECT COUNT(*) as cnt FROM files WHERE snapshot_id = $1`, [snapshot_id]),
         db.query(`SELECT COUNT(*) as cnt FROM symbol_versions WHERE snapshot_id = $1`, [snapshot_id]),
@@ -557,10 +568,24 @@ export async function handleSnapshotStats(args: Record<string, unknown>, log: Mc
         uncertaintyTracker.getSnapshotUncertainty(snapshot_id),
     ]);
 
+    const files = parseInt(fileCount.rows[0]?.cnt as string || '0', 10);
+    const symbols = parseInt(symbolCount.rows[0]?.cnt as string || '0', 10);
+
+    // If a snapshot exists but has zero files and zero symbols, it's orphaned
+    if (files === 0 && symbols === 0) {
+        const status = snapshotCheck.rows[0]?.index_status as string;
+        if (status === 'complete' || status === 'partial') {
+            return errorResult(
+                `Snapshot ${snapshot_id} is orphaned — it was superseded by a newer ingestion. ` +
+                `Re-ingest the repository to get a fresh snapshot.`
+            );
+        }
+    }
+
     return textResult({
         snapshot_id,
-        files: parseInt(fileCount.rows[0]?.cnt as string || '0', 10),
-        symbols: parseInt(symbolCount.rows[0]?.cnt as string || '0', 10),
+        files,
+        symbols,
         relations: parseInt(relationCount.rows[0]?.cnt as string || '0', 10),
         uncertainty: uncertaintyReport,
     });

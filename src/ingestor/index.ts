@@ -19,6 +19,7 @@ import { structuralGraphEngine } from '../analysis-engine';
 import { behavioralEngine } from '../analysis-engine/behavioral';
 import { contractEngine } from '../analysis-engine/contracts';
 import { extractFromTypeScript } from '../adapters/ts';
+import { semanticEngine } from '../semantic-engine';
 import { db } from '../db-driver';
 import { profileCache } from '../cache';
 import type { PoolClient } from 'pg';
@@ -203,6 +204,18 @@ export class Ingestor {
 
         // 7.5 Populate test artifacts
         await this.populateTestArtifacts(svRows, snapshotId, repoId);
+
+        // 7.6 Compute semantic embeddings (TF-IDF + MinHash + LSH)
+        // NEW-002 fix: Run batch embedding as part of ingestion so that
+        // semantic_intent_similarity in the homolog engine produces real
+        // values instead of always 0.
+        try {
+            const embedded = await semanticEngine.batchEmbedSnapshot(snapshotId);
+            log.info('Semantic embeddings computed', { snapshotId, embedded });
+        } catch (err) {
+            log.warn('Semantic embedding failed (non-fatal)', { snapshotId, error: err instanceof Error ? err.message : String(err) });
+            // Non-fatal: homolog engine falls back to name-based similarity
+        }
 
         // 8. Update repository language_set and snapshot status
         if (languageSet.size > 0) {

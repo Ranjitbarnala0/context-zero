@@ -729,6 +729,19 @@ class FullExtractor(cst.CSTVisitor):
                         "target_name": target,
                         "relation_type": "calls",
                     })
+                    # BUG-010 fix: For method calls like model.eval(),
+                    # also emit a relation to just the method name (eval).
+                    # This allows the structural graph to link method calls
+                    # to method definitions even without type inference.
+                    if '.' in target:
+                        method_name = target.rsplit('.', 1)[1]
+                        if method_name and method_name not in seen_calls:
+                            seen_calls.add(method_name)
+                            self.extractor.relations.append({
+                                "source_key": source_key,
+                                "target_name": method_name,
+                                "relation_type": "calls",
+                            })
 
             # Don't recurse into nested function/class definitions
             def visit_FunctionDef(self, nested_node: cst.FunctionDef):
@@ -865,7 +878,34 @@ class FullExtractor(cst.CSTVisitor):
                         elif first == 'None':
                             output_type = ""  # stays void
                         else:
-                            output_type = "Any"
+                            # BUG-004 fix: Trace named variable assignments.
+                            # If "return var_name" and we can find "var_name = {...}"
+                            # or "var_name = [...]" in the body, infer the type from
+                            # the assignment rather than defaulting to "Any".
+                            var_name = re.match(r'^([a-zA-Z_][a-zA-Z0-9_]*)$', first)
+                            if var_name:
+                                vn = var_name.group(1)
+                                # Search for assignment patterns for this variable
+                                assign_match = re.search(
+                                    rf'\b{re.escape(vn)}\s*=\s*(\{{|\[|\(|dict\(|list\(|tuple\(|set\(|OrderedDict\()',
+                                    body_text
+                                )
+                                if assign_match:
+                                    assign_rhs = assign_match.group(1)
+                                    if assign_rhs.startswith('{') or assign_rhs == 'dict(' or assign_rhs == 'OrderedDict(':
+                                        output_type = "dict"
+                                    elif assign_rhs.startswith('[') or assign_rhs == 'list(':
+                                        output_type = "list"
+                                    elif assign_rhs.startswith('(') or assign_rhs == 'tuple(':
+                                        output_type = "tuple"
+                                    elif assign_rhs == 'set(':
+                                        output_type = "set"
+                                    else:
+                                        output_type = "Any"
+                                else:
+                                    output_type = "Any"
+                            else:
+                                output_type = "Any"
                 except Exception:
                     pass  # Keep output_type as ""
 
