@@ -118,9 +118,16 @@ export function tokenizeName(name: string): string[] {
  * Tokenize a code body: extract all identifiers, split compound names,
  * remove keywords/noise, deduplicate.
  */
+/** Max code size for tokenization — beyond this, truncate to prevent CPU spike */
+const MAX_TOKENIZE_LENGTH = 100_000; // ~2500 lines
+
 export function tokenizeBody(code: string): string[] {
+    // Truncate extremely large bodies to prevent regex backtracking / CPU spike.
+    // 100K chars covers ~2500 lines — sufficient for TF-IDF token extraction.
+    const input = code.length > MAX_TOKENIZE_LENGTH ? code.slice(0, MAX_TOKENIZE_LENGTH) : code;
+
     // Strip comments: single-line and multi-line
-    let stripped = code.replace(/\/\/.*$/gm, '');
+    let stripped = input.replace(/\/\/.*$/gm, '');
     stripped = stripped.replace(/\/\*[\s\S]*?\*\//g, '');
 
     // Strip string literals (single-quoted, double-quoted, backtick)

@@ -82,10 +82,12 @@ class SemanticEngine {
                 // Build token sets from sparse vector keys
                 const tokenSets: Set<string>[] = [];
                 for (const row of rows) {
-                    const sparseVec: Record<string, number> =
-                        typeof row.sparse_vector === 'string'
+                    let sparseVec: Record<string, number>;
+                    try {
+                        sparseVec = typeof row.sparse_vector === 'string'
                             ? JSON.parse(row.sparse_vector)
                             : row.sparse_vector;
+                    } catch { continue; } // skip corrupt vectors
                     tokenSets.push(new Set(Object.keys(sparseVec)));
                 }
 
@@ -496,19 +498,21 @@ class SemanticEngine {
 
             const viewsA: Map<string, SparseVector> = new Map();
             for (const row of resultA.rows) {
-                const vec: SparseVector =
-                    typeof row.sparse_vector === 'string'
-                        ? JSON.parse(row.sparse_vector)
-                        : row.sparse_vector;
+                let vec: SparseVector;
+                try {
+                    vec = typeof row.sparse_vector === 'string'
+                        ? JSON.parse(row.sparse_vector) : row.sparse_vector;
+                } catch { continue; }
                 viewsA.set(row.view_type as string, vec);
             }
 
             const viewsB: Map<string, SparseVector> = new Map();
             for (const row of resultB.rows) {
-                const vec: SparseVector =
-                    typeof row.sparse_vector === 'string'
-                        ? JSON.parse(row.sparse_vector)
-                        : row.sparse_vector;
+                let vec: SparseVector;
+                try {
+                    vec = typeof row.sparse_vector === 'string'
+                        ? JSON.parse(row.sparse_vector) : row.sparse_vector;
+                } catch { continue; }
                 viewsB.set(row.view_type as string, vec);
             }
 
@@ -560,6 +564,7 @@ class SemanticEngine {
                     symv.symbol_version_id,
                     symv.signature,
                     symv.summary,
+                    symv.body_source,
                     s.canonical_name,
                     f.path AS file_path
                  FROM symbol_versions symv
@@ -623,9 +628,11 @@ class SemanticEngine {
                     };
                 }
 
-                // Use the symbol's summary as a proxy for code body
-                // (actual source code may not be stored in DB; summary captures intent)
-                const codeBody = (sym.summary as string) || '';
+                // Use stored body_source for accurate TF-IDF embedding.
+                // Falls back to summary only when body_source is not available
+                // (e.g., symbols ingested before the body_source migration).
+                // Nullish coalescing: empty string is valid body (interfaces, type aliases)
+                const codeBody = (sym.body_source as string | null) ?? (sym.summary as string) ?? '';
 
                 await this.embedSymbol(svId, codeBody, name, signature, behaviorHints, contractHint);
                 embedded++;

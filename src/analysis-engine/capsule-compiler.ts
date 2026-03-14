@@ -61,7 +61,12 @@ export class CapsuleCompiler {
         }
 
         const resolvedBasePath = repoBasePath ? path.resolve(repoBasePath) : null;
-        let targetCode = await this.readSourceCode(resolvedBasePath, target.file_path, target.range_start_line, target.range_end_line);
+        // Prefer stored body_source (DB-resident, Docker-safe, versioned).
+        // Fall back to disk read for symbols ingested before body_source migration.
+        // Nullish coalescing: empty string "" is a valid body (interfaces, type aliases).
+        // Only fall back to disk when body_source is null/undefined (pre-migration symbols).
+        let targetCode = target.body_source
+            ?? await this.readSourceCode(resolvedBasePath, target.file_path, target.range_start_line, target.range_end_line);
         let usedTokens = this.estimateTokens(targetCode) + this.estimateTokens(target.signature);
 
         const contextNodes: ContextNode[] = [];
@@ -119,64 +124,59 @@ export class CapsuleCompiler {
             ]);
         }
 
+        // Budget-aware node insertion: when full code exceeds budget,
+        // downgrade to signature/summary only. This prevents a single large
+        // dependency from exhausting the entire budget.
+        const addNodeBudgeted = (
+            node: ContextNode,
+            category: string,
+        ): boolean => {
+            const fullTokens = this.estimateTokens(node.code || node.summary || '');
+            if (usedTokens + fullTokens <= effectiveBudget) {
+                contextNodes.push(node);
+                usedTokens += fullTokens;
+                return true;
+            }
+            // Downgrade: drop code, keep signature/summary only
+            const summaryTokens = this.estimateTokens(node.summary || '');
+            if (node.code && usedTokens + summaryTokens <= effectiveBudget) {
+                contextNodes.push({ ...node, code: null });
+                usedTokens += summaryTokens;
+                omissionRationale.push(`${category} ${node.name}: code truncated to summary (budget)`);
+                return true;
+            }
+            omissionRationale.push(`Omitted ${category} ${node.name}: token budget exceeded`);
+            return false;
+        };
+
         // 1. Direct dependencies (all modes)
         for (const dep of deps) {
-            const tokens = this.estimateTokens(dep.code || dep.summary || '');
-            if (usedTokens + tokens > effectiveBudget) {
-                omissionRationale.push(`Omitted dependency ${dep.name}: token budget exceeded`);
-                continue;
-            }
-            contextNodes.push(dep);
-            usedTokens += tokens;
+            addNodeBudgeted(dep, 'dependency');
         }
 
         // 2. Callers (standard + strict)
         if (mode !== 'minimal') {
             for (const caller of callers) {
-                const tokens = this.estimateTokens(caller.code || caller.summary || '');
-                if (usedTokens + tokens > effectiveBudget) {
-                    omissionRationale.push(`Omitted caller ${caller.name}: token budget exceeded`);
-                    continue;
-                }
-                contextNodes.push(caller);
-                usedTokens += tokens;
+                addNodeBudgeted(caller, 'caller');
             }
         }
 
         // 3. Test context (standard + strict)
         if (mode !== 'minimal') {
             for (const test of tests) {
-                const tokens = this.estimateTokens(test.code || test.summary || '');
-                if (usedTokens + tokens > effectiveBudget) {
-                    omissionRationale.push(`Omitted test ${test.name}: token budget exceeded`);
-                    continue;
-                }
-                contextNodes.push(test);
-                usedTokens += tokens;
+                addNodeBudgeted(test, 'test');
             }
         }
 
         // 4. Contract and invariant context (strict only)
         if (mode === 'strict') {
             for (const contract of contracts) {
-                const tokens = this.estimateTokens(contract.summary || '');
-                if (usedTokens + tokens > effectiveBudget) {
-                    omissionRationale.push(`Omitted contract context: token budget exceeded`);
-                    break;
-                }
-                contextNodes.push(contract);
-                usedTokens += tokens;
+                if (!addNodeBudgeted(contract, 'contract')) break;
             }
 
             // 5. Homolog context (strict only)
             for (const hom of homologs) {
-                const tokens = this.estimateTokens(hom.code || hom.summary || '');
-                if (usedTokens + tokens > effectiveBudget) {
-                    omissionRationale.push(`Omitted homolog ${hom.name}: token budget exceeded`);
-                    continue;
-                }
-                contextNodes.push(hom);
-                usedTokens += tokens;
+                addNodeBudgeted(hom, 'homolog');
             }
         }
 
@@ -284,32 +284,34 @@ export class CapsuleCompiler {
         file_path: string;
         range_start_line: number;
         range_end_line: number;
+        body_source: string | null;
         uncertainty_flags: string[];
     } | null> {
         const result = await db.query(`
             SELECT sv.symbol_id, s.canonical_name, sv.signature,
                    f.path as file_path, sv.range_start_line, sv.range_end_line,
-                   sv.uncertainty_flags
+                   sv.body_source, sv.uncertainty_flags
             FROM symbol_versions sv
             JOIN symbols s ON s.symbol_id = sv.symbol_id
             JOIN files f ON f.file_id = sv.file_id
             WHERE sv.symbol_version_id = $1
         `, [svId]);
-        return result.rows[0] as typeof result.rows[0] & {
+        return (result.rows[0] as {
             symbol_id: string;
             canonical_name: string;
             signature: string;
             file_path: string;
             range_start_line: number;
             range_end_line: number;
+            body_source: string | null;
             uncertainty_flags: string[];
-        } ?? null;
+        } | undefined) ?? null;
     }
 
     private async loadDirectDependencies(svId: string): Promise<ContextNode[]> {
         const result = await db.query(`
             SELECT sv.symbol_version_id, s.canonical_name, sv.signature, sv.summary,
-                   sr.relation_type, sr.confidence
+                   sv.body_source, sr.relation_type, sr.confidence
             FROM structural_relations sr
             JOIN symbol_versions sv ON sv.symbol_version_id = sr.dst_symbol_version_id
             JOIN symbols s ON s.symbol_id = sv.symbol_id
@@ -323,13 +325,14 @@ export class CapsuleCompiler {
             canonical_name: string;
             signature: string;
             summary: string;
+            body_source: string | null;
             relation_type: string;
             confidence: number;
         }[]).map(row => ({
             type: 'dependency' as const,
             symbol_id: row.symbol_version_id,
             name: row.canonical_name,
-            code: null,
+            code: row.body_source ?? null,
             summary: `${row.relation_type}: ${row.signature || row.summary || 'no summary'}`,
             relevance: row.confidence,
         }));
@@ -338,7 +341,7 @@ export class CapsuleCompiler {
     private async loadCallers(svId: string): Promise<ContextNode[]> {
         const result = await db.query(`
             SELECT sv.symbol_version_id, s.canonical_name, sv.signature, sv.summary,
-                   sr.confidence
+                   sv.body_source, sr.confidence
             FROM structural_relations sr
             JOIN symbol_versions sv ON sv.symbol_version_id = sr.src_symbol_version_id
             JOIN symbols s ON s.symbol_id = sv.symbol_id
@@ -353,12 +356,13 @@ export class CapsuleCompiler {
             canonical_name: string;
             signature: string;
             summary: string;
+            body_source: string | null;
             confidence: number;
         }[]).map(row => ({
             type: 'caller' as const,
             symbol_id: row.symbol_version_id,
             name: row.canonical_name,
-            code: null,
+            code: row.body_source ?? null,
             summary: row.signature || row.summary || 'no summary',
             relevance: row.confidence,
         }));
@@ -422,7 +426,7 @@ export class CapsuleCompiler {
     private async loadHomologContext(snapshotId: string, svId: string): Promise<ContextNode[]> {
         const result = await db.query(`
             SELECT ir.dst_symbol_version_id, ir.relation_type, ir.confidence,
-                   s.canonical_name, sv.signature
+                   s.canonical_name, sv.signature, sv.body_source
             FROM inferred_relations ir
             JOIN symbol_versions sv ON sv.symbol_version_id = ir.dst_symbol_version_id
             JOIN symbols s ON s.symbol_id = sv.symbol_id
@@ -439,11 +443,12 @@ export class CapsuleCompiler {
             confidence: number;
             canonical_name: string;
             signature: string;
+            body_source: string | null;
         }[]).map(row => ({
             type: 'homolog' as const,
             symbol_id: row.dst_symbol_version_id,
             name: row.canonical_name,
-            code: null,
+            code: row.body_source ?? null,
             summary: `${row.relation_type} (confidence: ${row.confidence.toFixed(2)}): ${row.signature || 'no signature'}`,
             relevance: row.confidence,
         }));

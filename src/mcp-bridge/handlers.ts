@@ -1,7 +1,7 @@
 /**
  * ContextZero — MCP Bridge Tool Handlers
  *
- * Direct-call implementations for all 22 ContextZero tools, executing engine
+ * Direct-call implementations for all 27 ContextZero tools, executing engine
  * code without HTTP overhead. Each handler mirrors the logic from the REST API
  * but returns structured MCP CallToolResult payloads.
  *
@@ -22,6 +22,8 @@ import { uncertaintyTracker } from '../analysis-engine/uncertainty';
 import { homologInferenceEngine } from '../homolog-engine';
 import { transactionalChangeEngine } from '../transactional-editor';
 import { ingestor } from '../ingestor';
+import { tokenizeBody } from '../semantic-engine/tokenizer';
+import { computeTF, computeTFIDF, cosineSimilarity, SparseVector } from '../semantic-engine/similarity';
 import type { CapsuleMode, ValidationMode } from '../types';
 import type { McpLogger } from './index';
 
@@ -619,26 +621,87 @@ export async function handlePersistHomologs(args: Record<string, unknown>, log: 
 
 // ────────── Tool 23: Read Source Code ──────────
 //
-// This is the tool the evaluator was missing. ContextZero had 22 tools
-// but none could actually show source code. Users had to bypass MCP
-// and read files manually. This tool reads source code by symbol ID
-// or by file path within a registered repository.
+// Serves symbol source directly from the database (body_source column).
+// No disk I/O required — works in Docker, remote deployments, and
+// survives repo path changes. Falls back to disk for pre-migration data.
+// Supports batch queries (multiple symbol_version_ids in one call).
 
 export async function handleReadSource(args: Record<string, unknown>, log: McpLogger): Promise<CallToolResult> {
     const repo_id = args.repo_id as string;
     const symbol_version_id = args.symbol_version_id as string | undefined;
+    const symbol_version_ids = args.symbol_version_ids as string[] | undefined;
     const file_path = args.file_path as string | undefined;
     const start_line = typeof args.start_line === 'number' ? args.start_line : undefined;
     const end_line = typeof args.end_line === 'number' ? args.end_line : undefined;
     const context_lines = typeof args.context_lines === 'number' ? Math.min(args.context_lines, 50) : 0;
 
     if (!isUUID(repo_id)) return errorResult('repo_id is required and must be a valid UUID');
-    if (!symbol_version_id && !file_path) return errorResult('Either symbol_version_id or file_path is required');
-    if (symbol_version_id && !isUUID(symbol_version_id)) return errorResult('symbol_version_id must be a valid UUID');
 
-    log.debug('scg_read_source', { repo_id, symbol_version_id, file_path });
+    // Batch mode: multiple symbol_version_ids
+    const ids: string[] = [];
+    if (symbol_version_ids && Array.isArray(symbol_version_ids)) {
+        for (const id of symbol_version_ids) {
+            if (isUUID(id)) ids.push(id);
+        }
+    } else if (symbol_version_id && isUUID(symbol_version_id)) {
+        ids.push(symbol_version_id);
+    }
 
-    // Resolve repo base path
+    if (ids.length === 0 && !file_path) {
+        return errorResult('Either symbol_version_id, symbol_version_ids, or file_path is required');
+    }
+
+    log.debug('scg_read_source', { repo_id, ids: ids.length, file_path });
+
+    // Symbol-scoped serving (batch)
+    if (ids.length > 0) {
+        const placeholders = ids.map((_, i) => `$${i + 1}`).join(',');
+        const svResult = await db.query(`
+            SELECT sv.symbol_version_id, sv.range_start_line, sv.range_end_line,
+                   sv.signature, sv.summary, sv.body_source,
+                   s.canonical_name, s.kind, s.stable_key,
+                   f.path as file_path
+            FROM symbol_versions sv
+            JOIN symbols s ON s.symbol_id = sv.symbol_id
+            JOIN files f ON f.file_id = sv.file_id
+            WHERE sv.symbol_version_id IN (${placeholders})
+        `, ids);
+
+        if (svResult.rows.length === 0) return errorResult('No symbol versions found');
+
+        const symbols = (svResult.rows as {
+            symbol_version_id: string;
+            range_start_line: number;
+            range_end_line: number;
+            signature: string;
+            summary: string;
+            body_source: string | null;
+            canonical_name: string;
+            kind: string;
+            stable_key: string;
+            file_path: string;
+        }[]).map(sv => {
+            // Nullish coalescing: empty string is a valid body
+            const source = sv.body_source ?? null;
+
+            return {
+                symbol_version_id: sv.symbol_version_id,
+                canonical_name: sv.canonical_name,
+                kind: sv.kind,
+                signature: sv.signature,
+                summary: sv.summary,
+                file_path: sv.file_path,
+                start_line: sv.range_start_line,
+                end_line: sv.range_end_line,
+                source: source || '[source unavailable]',
+                token_estimate: source ? Math.ceil(source.length / 4) : 0,
+            };
+        });
+
+        return textResult({ symbols, count: symbols.length });
+    }
+
+    // File-path mode (unchanged — reads from disk)
     const repo = await coreDataService.getRepository(repo_id);
     if (!repo) return errorResult('Repository not found');
     const basePath = repo.base_path as string;
@@ -647,44 +710,11 @@ export async function handleReadSource(args: Record<string, unknown>, log: McpLo
     const fs = await import('fs');
     const path = await import('path');
 
-    let resolvedPath: string;
-    let rangeStart: number | undefined = start_line;
-    let rangeEnd: number | undefined = end_line;
-    let symbolMeta: Record<string, unknown> | null = null;
-
-    if (symbol_version_id) {
-        // Resolve from symbol version
-        const svResult = await db.query(`
-            SELECT sv.range_start_line, sv.range_end_line, sv.signature, sv.summary,
-                   s.canonical_name, s.kind, s.stable_key,
-                   f.path as file_path
-            FROM symbol_versions sv
-            JOIN symbols s ON s.symbol_id = sv.symbol_id
-            JOIN files f ON f.file_id = sv.file_id
-            WHERE sv.symbol_version_id = $1
-        `, [symbol_version_id]);
-
-        if (svResult.rows.length === 0) return errorResult('Symbol version not found');
-
-        const sv = svResult.rows[0] as Record<string, unknown>;
-        resolvedPath = path.resolve(basePath, sv.file_path as string);
-        rangeStart = rangeStart ?? (sv.range_start_line as number) - context_lines;
-        rangeEnd = rangeEnd ?? (sv.range_end_line as number) + context_lines;
-        symbolMeta = {
-            canonical_name: sv.canonical_name,
-            kind: sv.kind,
-            signature: sv.signature,
-            summary: sv.summary,
-            file_path: sv.file_path,
-            range: `${sv.range_start_line}-${sv.range_end_line}`,
-        };
-    } else {
-        // Resolve from file path
-        resolvedPath = path.resolve(basePath, file_path!);
-    }
+    const resolvedPath = path.resolve(basePath, file_path!);
 
     // Path traversal protection
-    const realBase = fs.realpathSync(basePath);
+    let realBase: string;
+    try { realBase = fs.realpathSync(basePath); } catch { return errorResult('Base path not accessible'); }
     if (!resolvedPath.startsWith(realBase + path.sep) && resolvedPath !== realBase) {
         return errorResult('Path traversal blocked');
     }
@@ -694,12 +724,11 @@ export async function handleReadSource(args: Record<string, unknown>, log: McpLo
         const lines = content.split('\n');
 
         let outputLines: string[];
-        if (rangeStart !== undefined && rangeEnd !== undefined) {
-            const s = Math.max(1, rangeStart);
-            const e = Math.min(lines.length, rangeEnd);
+        if (start_line !== undefined && end_line !== undefined) {
+            const s = Math.max(1, start_line);
+            const e = Math.min(lines.length, end_line);
             outputLines = lines.slice(s - 1, e).map((line, i) => `${s + i}: ${line}`);
         } else {
-            // Full file, cap at 500 lines
             const cap = Math.min(lines.length, 500);
             outputLines = lines.slice(0, cap).map((line, i) => `${i + 1}: ${line}`);
             if (lines.length > 500) {
@@ -708,8 +737,7 @@ export async function handleReadSource(args: Record<string, unknown>, log: McpLo
         }
 
         return textResult({
-            ...(symbolMeta ? { symbol: symbolMeta } : {}),
-            file_path: file_path || (symbolMeta as Record<string, unknown>)?.file_path,
+            file_path,
             total_lines: lines.length,
             source: outputLines.join('\n'),
         });
@@ -717,6 +745,7 @@ export async function handleReadSource(args: Record<string, unknown>, log: McpLo
         return errorResult('File not readable');
     }
 }
+
 
 // ────────── Tool 24: Search Code ──────────
 //
@@ -962,6 +991,322 @@ export async function handleCodebaseOverview(args: Record<string, unknown>, log:
             total_annotations: uncertainty.total_annotations,
             by_source: uncertainty.by_source,
             most_uncertain: uncertainty.most_uncertain_symbols.slice(0, 10),
+        },
+    });
+}
+
+// ────────── Tool 26: Semantic Search ──────────
+//
+// Body-content semantic search using TF-IDF similarity.
+// Unlike resolve_symbol (name-only pg_trgm), this searches INSIDE
+// function bodies. "where does the code accumulate V×V matrices"
+// returns relevant symbols ranked by body-view cosine similarity.
+
+export async function handleSemanticSearch(args: Record<string, unknown>, log: McpLogger): Promise<CallToolResult> {
+    const query = args.query as string;
+    const snapshot_id = args.snapshot_id as string;
+    const limit = typeof args.limit === 'number' ? Math.min(Math.max(args.limit, 1), 50) : 15;
+    const include_source = args.include_source !== false; // default true
+
+    if (!query || typeof query !== 'string') return errorResult('query is required');
+    if (query.length > 2000) return errorResult('query too long (max 2000 chars)');
+    if (!isUUID(snapshot_id)) return errorResult('snapshot_id is required and must be a valid UUID');
+
+    log.debug('scg_semantic_search', { query, snapshot_id, limit });
+
+    // Step 1: Tokenize the query using the same body tokenizer
+    const queryTokens = tokenizeBody(query);
+    if (queryTokens.length === 0) return textResult({ matches: [], total: 0, note: 'Query produced no tokens' });
+
+    // Step 2: Compute TF for query tokens
+    const queryTF = computeTF(queryTokens);
+
+    // Step 3: Load IDF for body view from this snapshot
+    const idfResult = await db.query(
+        `SELECT document_count, token_document_counts FROM idf_corpus
+         WHERE snapshot_id = $1 AND view_type = 'body'`,
+        [snapshot_id],
+    );
+
+    let queryIDF: Record<string, number> = {};
+    if (idfResult.rows.length > 0) {
+        const docCounts: Record<string, number> =
+            typeof idfResult.rows[0].token_document_counts === 'string'
+                ? JSON.parse(idfResult.rows[0].token_document_counts)
+                : idfResult.rows[0].token_document_counts;
+        const totalDocs = idfResult.rows[0].document_count as number;
+        for (const [token, freq] of Object.entries(docCounts)) {
+            queryIDF[token] = Math.log(1 + totalDocs / (1 + freq));
+        }
+        // Assign maximum IDF to out-of-vocabulary query tokens — these are
+        // rare/unique terms that strongly discriminate when they DO match.
+        const defaultIDF = Math.log(1 + totalDocs);
+        for (const token of Object.keys(queryTF)) {
+            if (!(token in queryIDF)) {
+                queryIDF[token] = defaultIDF;
+            }
+        }
+    }
+
+    // Step 4: Compute query TF-IDF vector
+    const queryVector = computeTFIDF(queryTF, queryIDF);
+
+    // Step 5: Load all body-view sparse vectors for this snapshot
+    const vectorsResult = await db.query(`
+        SELECT sv2.symbol_version_id, sv2.sparse_vector
+        FROM semantic_vectors sv2
+        JOIN symbol_versions symv ON symv.symbol_version_id = sv2.symbol_version_id
+        WHERE symv.snapshot_id = $1 AND sv2.view_type = 'body'
+    `, [snapshot_id]);
+
+    // Step 6: Score each symbol by cosine similarity with query
+    const scores: { svId: string; similarity: number }[] = [];
+
+    for (const row of vectorsResult.rows) {
+        let svVec: SparseVector;
+        try {
+            svVec = typeof row.sparse_vector === 'string'
+                ? JSON.parse(row.sparse_vector)
+                : row.sparse_vector;
+        } catch { continue; } // skip corrupt vectors
+
+        const sim = cosineSimilarity(queryVector, svVec);
+        if (sim > 0.01) { // filter noise
+            scores.push({ svId: row.symbol_version_id as string, similarity: sim });
+        }
+    }
+
+    // Step 7: Sort by similarity descending, take top results
+    scores.sort((a, b) => b.similarity - a.similarity);
+    const topResults = scores.slice(0, limit);
+
+    if (topResults.length === 0) {
+        return textResult({ matches: [], total: 0, note: 'No semantic matches found' });
+    }
+
+    // Step 8: Load symbol metadata (and optionally source) for top results
+    const topIds = topResults.map(r => r.svId);
+    const placeholders = topIds.map((_, i) => `$${i + 1}`).join(',');
+    const metaResult = await db.query(`
+        SELECT sv.symbol_version_id, s.canonical_name, s.kind, s.stable_key,
+               sv.signature, sv.summary, sv.body_source,
+               f.path as file_path, sv.range_start_line, sv.range_end_line
+        FROM symbol_versions sv
+        JOIN symbols s ON s.symbol_id = sv.symbol_id
+        JOIN files f ON f.file_id = sv.file_id
+        WHERE sv.symbol_version_id IN (${placeholders})
+    `, topIds);
+
+    const metaMap = new Map<string, Record<string, unknown>>();
+    for (const row of metaResult.rows) {
+        metaMap.set(row.symbol_version_id as string, row as Record<string, unknown>);
+    }
+
+    const matches = topResults.map(r => {
+        const meta = metaMap.get(r.svId);
+        if (!meta) return null;
+        return {
+            symbol_version_id: r.svId,
+            canonical_name: meta.canonical_name,
+            kind: meta.kind,
+            file_path: meta.file_path,
+            start_line: meta.range_start_line,
+            end_line: meta.range_end_line,
+            signature: meta.signature,
+            similarity: parseFloat(r.similarity.toFixed(4)),
+            ...(include_source && meta.body_source ? {
+                source: meta.body_source,
+                token_estimate: Math.ceil((meta.body_source as string).length / 4),
+            } : {}),
+        };
+    }).filter(Boolean);
+
+    return textResult({
+        query,
+        total: matches.length,
+        matches,
+    });
+}
+
+// ────────── Tool 27: Smart Context ──────────
+//
+// Task-oriented context bundles. Instead of the consumer making 8+ calls
+// to gather context for a change task, this tool:
+//   1. Takes a task description + target symbols + token budget
+//   2. Computes blast radius for targets
+//   3. Ranks all impacted symbols by relevance to the task
+//   4. Bundles target source + impacted source + tests + homologs
+//   5. Returns a single response with everything needed, token-budgeted
+//
+// This is the "give me everything I need for this change" tool.
+
+export async function handleSmartContext(args: Record<string, unknown>, log: McpLogger): Promise<CallToolResult> {
+    const task_description = args.task_description as string;
+    const target_symbol_version_ids = args.target_symbol_version_ids as string[];
+    const snapshot_id = args.snapshot_id as string;
+    const token_budget = typeof args.token_budget === 'number' ? Math.min(args.token_budget, 100_000) : 20_000;
+    const depth = typeof args.depth === 'number' ? Math.min(Math.max(args.depth, 1), 5) : 2;
+
+    if (!task_description || typeof task_description !== 'string') return errorResult('task_description is required');
+    if (!Array.isArray(target_symbol_version_ids) || target_symbol_version_ids.length === 0) {
+        return errorResult('target_symbol_version_ids is required (non-empty array of UUIDs)');
+    }
+    if (!isUUID(snapshot_id)) return errorResult('snapshot_id is required and must be a valid UUID');
+    for (const id of target_symbol_version_ids) {
+        if (!isUUID(id)) return errorResult(`Invalid UUID in target_symbol_version_ids: ${id}`);
+    }
+
+    log.debug('scg_smart_context', {
+        task: task_description.slice(0, 100),
+        targets: target_symbol_version_ids.length,
+        budget: token_budget,
+    });
+
+    const CHARS_PER_TOKEN = 4;
+    let usedTokens = 0;
+
+    // Step 1: Load target symbols with source
+    const targetPlaceholders = target_symbol_version_ids.map((_, i) => `$${i + 1}`).join(',');
+    const targetsResult = await db.query(`
+        SELECT sv.symbol_version_id, s.canonical_name, s.kind, sv.signature,
+               sv.summary, sv.body_source, f.path as file_path,
+               sv.range_start_line, sv.range_end_line
+        FROM symbol_versions sv
+        JOIN symbols s ON s.symbol_id = sv.symbol_id
+        JOIN files f ON f.file_id = sv.file_id
+        WHERE sv.symbol_version_id IN (${targetPlaceholders})
+    `, target_symbol_version_ids);
+
+    const targets = (targetsResult.rows as {
+        symbol_version_id: string; canonical_name: string; kind: string;
+        signature: string; summary: string; body_source: string | null;
+        file_path: string; range_start_line: number; range_end_line: number;
+    }[]).map(t => {
+        const source = t.body_source ?? '[source unavailable]';
+        const tokens = Math.ceil(source.length / CHARS_PER_TOKEN);
+        usedTokens += tokens;
+        return {
+            symbol_version_id: t.symbol_version_id,
+            canonical_name: t.canonical_name,
+            kind: t.kind,
+            signature: t.signature,
+            file_path: t.file_path,
+            start_line: t.range_start_line,
+            end_line: t.range_end_line,
+            source,
+            token_estimate: tokens,
+        };
+    });
+
+    // Step 2: Compute blast radius
+    const blastReport = await blastRadiusEngine.computeBlastRadius(
+        snapshot_id, target_symbol_version_ids, depth
+    );
+
+    // Step 3: Collect all unique impacted symbol_version_ids
+    const allImpacts = [
+        ...blastReport.structural_impacts,
+        ...blastReport.behavioral_impacts,
+        ...blastReport.contract_impacts,
+        ...blastReport.homolog_impacts,
+        ...blastReport.historical_impacts,
+    ];
+
+    // Deduplicate and rank by severity
+    const severityRank: Record<string, number> = { critical: 4, high: 3, medium: 2, low: 1 };
+    const impactMap = new Map<string, typeof allImpacts[0]>();
+    for (const impact of allImpacts) {
+        const existing = impactMap.get(impact.symbol_id);
+        if (!existing || (severityRank[impact.severity] || 0) > (severityRank[existing.severity] || 0)) {
+            impactMap.set(impact.symbol_id, impact);
+        }
+    }
+
+    // Sort by severity descending
+    const rankedImpacts = Array.from(impactMap.values())
+        .sort((a, b) => (severityRank[b.severity] || 0) - (severityRank[a.severity] || 0));
+
+    // Step 4: Load source for impacted symbols, budgeted
+    const contextSymbols: {
+        symbol_name: string; kind: string; file_path: string | null;
+        start_line: number | null; end_line: number | null;
+        impact_type: string; severity: string; evidence: string;
+        source: string | null; token_estimate: number;
+    }[] = [];
+    const omitted: string[] = [];
+
+    // Batch-load impacted symbols that have source
+    const impactSvIds: string[] = [];
+    for (const impact of rankedImpacts) {
+        // impact.symbol_id is actually symbol_id; we need symbol_version_id
+        // The blast radius queries return symbol_id from the symbols table
+        impactSvIds.push(impact.symbol_id);
+    }
+
+    // Load body_source for impacted symbols (by symbol_id, matching snapshot)
+    let impactSourceMap = new Map<string, { body_source: string | null; canonical_name: string; kind: string; file_path: string; start_line: number; end_line: number }>();
+    if (impactSvIds.length > 0) {
+        const impPlaceholders = impactSvIds.map((_, i) => `$${i + 2}`).join(',');
+        const impResult = await db.query(`
+            SELECT sv.symbol_version_id, s.symbol_id, s.canonical_name, s.kind,
+                   sv.body_source, f.path as file_path,
+                   sv.range_start_line, sv.range_end_line
+            FROM symbol_versions sv
+            JOIN symbols s ON s.symbol_id = sv.symbol_id
+            JOIN files f ON f.file_id = sv.file_id
+            WHERE sv.snapshot_id = $1 AND s.symbol_id IN (${impPlaceholders})
+        `, [snapshot_id, ...impactSvIds]);
+
+        for (const row of impResult.rows) {
+            impactSourceMap.set(row.symbol_id as string, {
+                body_source: row.body_source as string | null,
+                canonical_name: row.canonical_name as string,
+                kind: row.kind as string,
+                file_path: row.file_path as string,
+                start_line: row.range_start_line as number,
+                end_line: row.range_end_line as number,
+            });
+        }
+    }
+
+    for (const impact of rankedImpacts) {
+        const meta = impactSourceMap.get(impact.symbol_id);
+        const source = (meta?.body_source as string | null | undefined) ?? null;
+        const tokens = source ? Math.ceil(source.length / CHARS_PER_TOKEN) : 0;
+
+        if (usedTokens + tokens > token_budget) {
+            omitted.push(`${impact.symbol_name} (${impact.severity} ${impact.impact_type}) — budget exceeded`);
+            continue;
+        }
+
+        contextSymbols.push({
+            symbol_name: impact.symbol_name,
+            kind: meta?.kind || 'unknown',
+            file_path: impact.file_path,
+            start_line: impact.start_line,
+            end_line: impact.end_line,
+            impact_type: impact.impact_type,
+            severity: impact.severity,
+            evidence: impact.evidence,
+            source,
+            token_estimate: tokens,
+        });
+        usedTokens += tokens;
+    }
+
+    return textResult({
+        task: task_description,
+        targets,
+        blast_radius: {
+            total_impacts: blastReport.total_impact_count,
+            validation_scope: blastReport.recommended_validation_scope,
+        },
+        context: contextSymbols,
+        omitted: omitted.length > 0 ? omitted : undefined,
+        token_usage: {
+            budget: token_budget,
+            used: usedTokens,
+            remaining: token_budget - usedTokens,
         },
     });
 }

@@ -68,6 +68,7 @@ export interface SymbolVersionInput {
     body_hash: string;
     normalized_ast_hash?: string;
     summary: string;
+    body_source?: string | null;
     visibility: string;
     language: string;
     uncertainty_flags?: string[];
@@ -87,6 +88,7 @@ export interface SymbolVersionRow {
     ast_hash: string;
     body_hash: string;
     summary: string;
+    body_source: string | null;
     visibility: string;
     language: string;
     uncertainty_flags: string[];
@@ -208,8 +210,8 @@ export class CoreDataService {
                 symbol_version_id, symbol_id, snapshot_id, file_id,
                 range_start_line, range_start_col, range_end_line, range_end_col,
                 signature, ast_hash, body_hash, normalized_ast_hash,
-                summary, visibility, language, uncertainty_flags
-            ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16)
+                summary, body_source, visibility, language, uncertainty_flags
+            ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17)
             ON CONFLICT (symbol_id, snapshot_id) DO UPDATE SET
                 file_id = EXCLUDED.file_id,
                 range_start_line = EXCLUDED.range_start_line,
@@ -221,6 +223,7 @@ export class CoreDataService {
                 body_hash = EXCLUDED.body_hash,
                 normalized_ast_hash = EXCLUDED.normalized_ast_hash,
                 summary = EXCLUDED.summary,
+                body_source = EXCLUDED.body_source,
                 visibility = EXCLUDED.visibility,
                 language = EXCLUDED.language,
                 uncertainty_flags = EXCLUDED.uncertainty_flags
@@ -228,7 +231,7 @@ export class CoreDataService {
             id, input.symbol_id, input.snapshot_id, input.file_id,
             input.range_start_line, input.range_start_col, input.range_end_line, input.range_end_col,
             input.signature, input.ast_hash, input.body_hash, input.normalized_ast_hash || null,
-            input.summary, input.visibility, input.language,
+            input.summary, input.body_source ?? null, input.visibility, input.language,
             input.uncertainty_flags || []
         ]);
         const existing = await db.query(

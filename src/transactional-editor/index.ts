@@ -385,7 +385,7 @@ export class TransactionalChangeEngine {
                 try {
                     // Validate path from DB before any filesystem operation — defense against
                     // DB compromise or corruption injecting paths outside the repo directory
-                    const resolvedBackupPath = path.resolve(backup.file_path);
+                    const resolvedBackupPath = path.resolve(realBase, backup.file_path);
                     if (!resolvedBackupPath.startsWith(realBase + path.sep) && resolvedBackupPath !== realBase) {
                         log.error('Rollback path traversal blocked — skipping', undefined, { filePath: backup.file_path });
                         continue;

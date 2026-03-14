@@ -245,6 +245,13 @@ export function estimateJaccardFromMinHash(
     const length = Math.min(sigA.length, sigB.length);
     if (length === 0) return 0;
 
+    // Empty token sets produce all-0xFFFFFFFF signatures (sentinel).
+    // Two empty sets matching is a sentinel collision, not real similarity.
+    const EMPTY_SENTINEL = 0xFFFFFFFF;
+    const aIsEmpty = sigA.every(v => v === EMPTY_SENTINEL);
+    const bIsEmpty = sigB.every(v => v === EMPTY_SENTINEL);
+    if (aIsEmpty || bIsEmpty) return 0;
+
     let matches = 0;
     for (let i = 0; i < length; i++) {
         if (sigA[i] === sigB[i]) {

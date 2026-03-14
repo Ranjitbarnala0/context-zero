@@ -31,6 +31,8 @@ import { uncertaintyTracker } from '../analysis-engine/uncertainty';
 import { homologInferenceEngine } from '../homolog-engine';
 import { transactionalChangeEngine } from '../transactional-editor';
 import { ingestor } from '../ingestor';
+import { tokenizeBody } from '../semantic-engine/tokenizer';
+import { computeTF, computeTFIDF, cosineSimilarity, SparseVector } from '../semantic-engine/similarity';
 import { authMiddleware } from '../middleware/auth';
 import { rateLimitMiddleware } from '../middleware/rate-limiter';
 import {
@@ -845,48 +847,73 @@ app.post('/scg_read_source',
         repo_id: requireUUID,
         symbol_version_id: optionalUUID,
         file_path: optionalString,
-        start_line: requireBoundedInt(1, 100_000),
-        end_line: requireBoundedInt(1, 100_000),
-        context_lines: requireBoundedInt(0, 50),
     }),
     safeHandler(async (req, res) => {
-        const { repo_id, symbol_version_id, file_path: reqFilePath, start_line, end_line, context_lines = 0 } = req.body;
+        const { repo_id, symbol_version_id, symbol_version_ids,
+                file_path: reqFilePath, context_lines: rawCtx } = req.body;
+        const context_lines = typeof rawCtx === 'number' ? Math.min(Math.max(rawCtx, 0), 50) : 0;
 
-        if (!symbol_version_id && !reqFilePath) {
-            res.status(400).json({ error: 'Either symbol_version_id or file_path is required' });
+        // Batch mode: multiple symbol_version_ids served from DB
+        const ids: string[] = [];
+        if (Array.isArray(symbol_version_ids)) {
+            for (const id of symbol_version_ids) {
+                if (typeof id === 'string' && /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(id)) {
+                    ids.push(id);
+                }
+            }
+        } else if (symbol_version_id) {
+            ids.push(symbol_version_id);
+        }
+
+        if (ids.length === 0 && !reqFilePath) {
+            res.status(400).json({ error: 'Either symbol_version_id, symbol_version_ids, or file_path is required' });
             return;
         }
 
+        // Symbol-scoped DB serving (batch)
+        if (ids.length > 0) {
+            const placeholders = ids.map((_, i) => `$${i + 1}`).join(',');
+            const svResult = await db.query(`
+                SELECT sv.symbol_version_id, sv.range_start_line, sv.range_end_line,
+                       sv.signature, sv.summary, sv.body_source,
+                       s.canonical_name, s.kind, f.path as file_path
+                FROM symbol_versions sv
+                JOIN symbols s ON s.symbol_id = sv.symbol_id
+                JOIN files f ON f.file_id = sv.file_id
+                WHERE sv.symbol_version_id IN (${placeholders})
+            `, ids);
+
+            if (svResult.rows.length === 0) { res.status(404).json({ error: 'No symbol versions found' }); return; }
+
+            const symbols = (svResult.rows as Record<string, unknown>[]).map(sv => {
+                const source = (sv.body_source as string | null) ?? null;
+                return {
+                    symbol_version_id: sv.symbol_version_id,
+                    canonical_name: sv.canonical_name,
+                    kind: sv.kind,
+                    signature: sv.signature,
+                    summary: sv.summary,
+                    file_path: sv.file_path,
+                    start_line: sv.range_start_line,
+                    end_line: sv.range_end_line,
+                    source: source ?? '[source unavailable]',
+                    token_estimate: source ? Math.ceil(source.length / 4) : 0,
+                };
+            });
+
+            res.json({ symbols, count: symbols.length });
+            return;
+        }
+
+        // File-path mode (disk read)
         const repo = await coreDataService.getRepository(repo_id);
         if (!repo) { res.status(404).json({ error: 'Repository not found' }); return; }
         const basePath = repo.base_path as string;
         if (!basePath) { res.status(400).json({ error: 'Repository base path not configured' }); return; }
 
-        let resolvedPath: string;
-        let rangeStart = start_line as number | undefined;
-        let rangeEnd = end_line as number | undefined;
-        let symbolMeta: Record<string, unknown> | null = null;
-
-        if (symbol_version_id) {
-            const svResult = await db.query(`
-                SELECT sv.range_start_line, sv.range_end_line, sv.signature, sv.summary,
-                       s.canonical_name, s.kind, f.path as file_path
-                FROM symbol_versions sv
-                JOIN symbols s ON s.symbol_id = sv.symbol_id
-                JOIN files f ON f.file_id = sv.file_id
-                WHERE sv.symbol_version_id = $1
-            `, [symbol_version_id]);
-            if (svResult.rows.length === 0) { res.status(404).json({ error: 'Symbol version not found' }); return; }
-            const sv = svResult.rows[0] as Record<string, unknown>;
-            resolvedPath = path.resolve(basePath, sv.file_path as string);
-            rangeStart = rangeStart ?? (sv.range_start_line as number) - context_lines;
-            rangeEnd = rangeEnd ?? (sv.range_end_line as number) + context_lines;
-            symbolMeta = { canonical_name: sv.canonical_name, kind: sv.kind, signature: sv.signature, summary: sv.summary, file_path: sv.file_path };
-        } else {
-            resolvedPath = path.resolve(basePath, reqFilePath);
-        }
-
-        const realBase = fs.realpathSync(basePath);
+        const resolvedPath = path.resolve(basePath, reqFilePath);
+        let realBase: string;
+        try { realBase = fs.realpathSync(basePath); } catch { res.status(400).json({ error: 'Base path not accessible' }); return; }
         if (!resolvedPath.startsWith(realBase + path.sep) && resolvedPath !== realBase) {
             res.status(403).json({ error: 'Path traversal blocked' }); return;
         }
@@ -894,17 +921,10 @@ app.post('/scg_read_source',
         try {
             const content = fs.readFileSync(resolvedPath, 'utf-8');
             const lines = content.split('\n');
-            let outputLines: string[];
-            if (rangeStart && rangeEnd) {
-                const s = Math.max(1, rangeStart);
-                const e = Math.min(lines.length, rangeEnd);
-                outputLines = lines.slice(s - 1, e).map((line, i) => `${s + i}: ${line}`);
-            } else {
-                const cap = Math.min(lines.length, 500);
-                outputLines = lines.slice(0, cap).map((line, i) => `${i + 1}: ${line}`);
-                if (lines.length > 500) outputLines.push(`... (${lines.length - 500} more lines truncated)`);
-            }
-            res.json({ ...(symbolMeta ? { symbol: symbolMeta } : {}), total_lines: lines.length, source: outputLines.join('\n') });
+            const cap = Math.min(lines.length, 500);
+            const outputLines = lines.slice(0, cap).map((line, i) => `${i + 1}: ${line}`);
+            if (lines.length > 500) outputLines.push(`... (${lines.length - 500} more lines truncated)`);
+            res.json({ file_path: reqFilePath, total_lines: lines.length, source: outputLines.join('\n') });
         } catch {
             res.status(404).json({ error: 'File not readable' });
         }
@@ -1052,6 +1072,227 @@ app.post('/scg_codebase_overview',
                            coverage_percent: symbols.length > 0 ? ((testedCount / symbols.length) * 100).toFixed(1) + '%' : '0%' },
             uncertainty: { overall_confidence: uncertainty.overall_confidence, total_annotations: uncertainty.total_annotations,
                          by_source: uncertainty.by_source, most_uncertain: uncertainty.most_uncertain_symbols.slice(0, 10) },
+        });
+    })
+);
+
+// ────────── Tool 26: Semantic Search ──────────
+
+app.post('/scg_semantic_search',
+    JSON_QUERY,
+    validateBody({
+        query: requireString,
+        snapshot_id: requireUUID,
+    }),
+    safeHandler(async (req, res) => {
+        const { query, snapshot_id, limit: rawLimit, include_source } = req.body;
+        const limit = typeof rawLimit === 'number' ? Math.min(Math.max(rawLimit, 1), 50) : 15;
+
+        // Tokenize query using body tokenizer
+        const queryTokens = tokenizeBody(query);
+        if (queryTokens.length === 0) {
+            res.json({ matches: [], total: 0, note: 'Query produced no tokens' });
+            return;
+        }
+
+        const queryTF = computeTF(queryTokens);
+
+        // Load IDF for body view
+        const idfResult = await db.query(
+            `SELECT document_count, token_document_counts FROM idf_corpus WHERE snapshot_id = $1 AND view_type = 'body'`,
+            [snapshot_id],
+        );
+        let queryIDF: Record<string, number> = {};
+        if (idfResult.rows.length > 0) {
+            const docCounts: Record<string, number> = typeof idfResult.rows[0].token_document_counts === 'string'
+                ? JSON.parse(idfResult.rows[0].token_document_counts) : idfResult.rows[0].token_document_counts;
+            const totalDocs = idfResult.rows[0].document_count as number;
+            for (const [token, freq] of Object.entries(docCounts)) {
+                queryIDF[token] = Math.log(1 + totalDocs / (1 + freq));
+            }
+            // OOV query tokens get maximum IDF — rare terms are highly discriminative
+            const defaultIDF = Math.log(1 + totalDocs);
+            for (const token of Object.keys(queryTF)) {
+                if (!(token in queryIDF)) queryIDF[token] = defaultIDF;
+            }
+        }
+
+        const queryVector = computeTFIDF(queryTF, queryIDF);
+
+        // Score all body vectors
+        const vectorsResult = await db.query(`
+            SELECT sv2.symbol_version_id, sv2.sparse_vector FROM semantic_vectors sv2
+            JOIN symbol_versions symv ON symv.symbol_version_id = sv2.symbol_version_id
+            WHERE symv.snapshot_id = $1 AND sv2.view_type = 'body'
+        `, [snapshot_id]);
+
+        const scores: { svId: string; similarity: number }[] = [];
+        for (const row of vectorsResult.rows) {
+            let svVec: SparseVector;
+            try {
+                svVec = typeof row.sparse_vector === 'string' ? JSON.parse(row.sparse_vector) : row.sparse_vector;
+            } catch { continue; }
+            const sim = cosineSimilarity(queryVector, svVec);
+            if (sim > 0.01) scores.push({ svId: row.symbol_version_id as string, similarity: sim });
+        }
+
+        scores.sort((a, b) => b.similarity - a.similarity);
+        const topResults = scores.slice(0, limit);
+
+        if (topResults.length === 0) {
+            res.json({ matches: [], total: 0, note: 'No semantic matches found' });
+            return;
+        }
+
+        const topIds = topResults.map(r => r.svId);
+        const placeholders = topIds.map((_, i) => `$${i + 1}`).join(',');
+        const metaResult = await db.query(`
+            SELECT sv.symbol_version_id, s.canonical_name, s.kind,
+                   sv.signature, sv.summary, sv.body_source,
+                   f.path as file_path, sv.range_start_line, sv.range_end_line
+            FROM symbol_versions sv JOIN symbols s ON s.symbol_id = sv.symbol_id JOIN files f ON f.file_id = sv.file_id
+            WHERE sv.symbol_version_id IN (${placeholders})
+        `, topIds);
+
+        const metaMap = new Map<string, Record<string, unknown>>();
+        for (const row of metaResult.rows) metaMap.set(row.symbol_version_id as string, row as Record<string, unknown>);
+
+        const matches = topResults.map(r => {
+            const meta = metaMap.get(r.svId);
+            if (!meta) return null;
+            return {
+                symbol_version_id: r.svId,
+                canonical_name: meta.canonical_name,
+                kind: meta.kind,
+                file_path: meta.file_path,
+                start_line: meta.range_start_line,
+                end_line: meta.range_end_line,
+                signature: meta.signature,
+                similarity: parseFloat(r.similarity.toFixed(4)),
+                ...(include_source !== false && meta.body_source ? {
+                    source: meta.body_source,
+                    token_estimate: Math.ceil((meta.body_source as string).length / 4),
+                } : {}),
+            };
+        }).filter(Boolean);
+
+        res.json({ query, total: matches.length, matches });
+    })
+);
+
+// ────────── Tool 27: Smart Context ──────────
+
+app.post('/scg_smart_context',
+    JSON_QUERY,
+    validateBody({
+        task_description: requireString,
+        target_symbol_version_ids: requireUUIDArray,
+        snapshot_id: requireUUID,
+    }),
+    safeHandler(async (req, res) => {
+        const { task_description, target_symbol_version_ids, snapshot_id,
+                token_budget: rawBudget, depth: rawDepth } = req.body;
+        const token_budget = typeof rawBudget === 'number' ? Math.min(rawBudget, 100_000) : 20_000;
+        const depth = typeof rawDepth === 'number' ? Math.min(Math.max(rawDepth, 1), 5) : 2;
+        const CHARS_PER_TOKEN = 4;
+        let usedTokens = 0;
+
+        // Load targets with source
+        const targetPH = target_symbol_version_ids.map((_: string, i: number) => `$${i + 1}`).join(',');
+        const targetsResult = await db.query(`
+            SELECT sv.symbol_version_id, s.canonical_name, s.kind, sv.signature,
+                   sv.summary, sv.body_source, f.path as file_path,
+                   sv.range_start_line, sv.range_end_line
+            FROM symbol_versions sv JOIN symbols s ON s.symbol_id = sv.symbol_id JOIN files f ON f.file_id = sv.file_id
+            WHERE sv.symbol_version_id IN (${targetPH})
+        `, target_symbol_version_ids);
+
+        const targets = (targetsResult.rows as Record<string, unknown>[]).map(t => {
+            const source = (t.body_source as string | null) ?? '[source unavailable]';
+            const tokens = Math.ceil(source.length / CHARS_PER_TOKEN);
+            usedTokens += tokens;
+            return {
+                symbol_version_id: t.symbol_version_id,
+                canonical_name: t.canonical_name,
+                kind: t.kind,
+                signature: t.signature,
+                file_path: t.file_path,
+                start_line: t.range_start_line,
+                end_line: t.range_end_line,
+                source,
+                token_estimate: tokens,
+            };
+        });
+
+        // Blast radius
+        const blastReport = await blastRadiusEngine.computeBlastRadius(snapshot_id, target_symbol_version_ids, depth);
+
+        const allImpacts = [
+            ...blastReport.structural_impacts, ...blastReport.behavioral_impacts,
+            ...blastReport.contract_impacts, ...blastReport.homolog_impacts,
+            ...blastReport.historical_impacts,
+        ];
+
+        const severityRank: Record<string, number> = { critical: 4, high: 3, medium: 2, low: 1 };
+        const impactMap = new Map<string, typeof allImpacts[0]>();
+        for (const impact of allImpacts) {
+            const existing = impactMap.get(impact.symbol_id);
+            if (!existing || (severityRank[impact.severity] || 0) > (severityRank[existing.severity] || 0))
+                impactMap.set(impact.symbol_id, impact);
+        }
+
+        const rankedImpacts = Array.from(impactMap.values())
+            .sort((a, b) => (severityRank[b.severity] || 0) - (severityRank[a.severity] || 0));
+
+        // Load source for impacted symbols
+        const impactSymIds = rankedImpacts.map(i => i.symbol_id);
+        let impactSourceMap = new Map<string, Record<string, unknown>>();
+        if (impactSymIds.length > 0) {
+            const impPH = impactSymIds.map((_, i) => `$${i + 2}`).join(',');
+            const impResult = await db.query(`
+                SELECT s.symbol_id, s.canonical_name, s.kind, sv.body_source,
+                       f.path as file_path, sv.range_start_line, sv.range_end_line
+                FROM symbol_versions sv JOIN symbols s ON s.symbol_id = sv.symbol_id JOIN files f ON f.file_id = sv.file_id
+                WHERE sv.snapshot_id = $1 AND s.symbol_id IN (${impPH})
+            `, [snapshot_id, ...impactSymIds]);
+            for (const row of impResult.rows) impactSourceMap.set(row.symbol_id as string, row as Record<string, unknown>);
+        }
+
+        const contextSymbols: Record<string, unknown>[] = [];
+        const omitted: string[] = [];
+
+        for (const impact of rankedImpacts) {
+            const meta = impactSourceMap.get(impact.symbol_id);
+            const source = (meta?.body_source as string | null | undefined) ?? null;
+            const tokens = source ? Math.ceil(source.length / CHARS_PER_TOKEN) : 0;
+
+            if (usedTokens + tokens > token_budget) {
+                omitted.push(`${impact.symbol_name} (${impact.severity} ${impact.impact_type})`);
+                continue;
+            }
+
+            contextSymbols.push({
+                symbol_name: impact.symbol_name,
+                kind: meta?.kind || 'unknown',
+                file_path: impact.file_path,
+                start_line: impact.start_line,
+                end_line: impact.end_line,
+                impact_type: impact.impact_type,
+                severity: impact.severity,
+                evidence: impact.evidence,
+                source,
+                token_estimate: tokens,
+            });
+            usedTokens += tokens;
+        }
+
+        res.json({
+            task: task_description,
+            targets,
+            blast_radius: { total_impacts: blastReport.total_impact_count, validation_scope: blastReport.recommended_validation_scope },
+            context: contextSymbols,
+            omitted: omitted.length > 0 ? omitted : undefined,
+            token_usage: { budget: token_budget, used: usedTokens, remaining: token_budget - usedTokens },
         });
     })
 );

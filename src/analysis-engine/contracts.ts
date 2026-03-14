@@ -41,16 +41,17 @@ export class ContractEngine {
             : 'never';
 
         // Extract security and serialization contracts from decorators
-        const securityDecorators = hint.decorators.filter(d =>
+        const decorators = hint.decorators || [];
+        const securityDecorators = decorators.filter(d =>
             /auth|guard|role|permission|security|token|session/i.test(d)
         );
-        const serializationDecorators = hint.decorators.filter(d =>
+        const serializationDecorators = decorators.filter(d =>
             /serialize|transform|expose|exclude|json|xml|proto/i.test(d)
         );
-        const schemaDecorators = hint.decorators.filter(d =>
+        const schemaDecorators = decorators.filter(d =>
             /schema|validate|is|matches|min|max|length/i.test(d)
         );
-        const apiDecorators = hint.decorators.filter(d =>
+        const apiDecorators = decorators.filter(d =>
             /get|post|put|delete|patch|route|api|endpoint|controller/i.test(d)
         );
 

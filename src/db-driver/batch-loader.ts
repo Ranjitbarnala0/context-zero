@@ -28,10 +28,20 @@ export class BatchLoader {
     private contractCache = new Map<string, ContractProfile>();
     private symbolVersionCache = new Map<string, SymbolVersionRow[]>();
 
+    /** Allowed table/column combinations — prevents SQL injection */
+    private static readonly ALLOWED_QUERIES: Record<string, string[]> = {
+        'behavioral_profiles': ['symbol_version_id'],
+        'contract_profiles': ['symbol_version_id'],
+        'symbol_versions': ['symbol_version_id', 'symbol_id'],
+    };
+
     /**
      * Execute a chunked IN query against a table keyed by symbol_version_id.
      * Splits large ID arrays into chunks of CHUNK_SIZE to stay within
      * PostgreSQL's parameter limit. Returns all matched rows merged.
+     *
+     * Table and column names are validated against an allowlist to prevent
+     * SQL injection — they cannot be parameterized in PostgreSQL.
      */
     private async chunkedInQuery<T>(
         table: string,
@@ -39,6 +49,12 @@ export class BatchLoader {
         ids: string[]
     ): Promise<T[]> {
         if (ids.length === 0) return [];
+
+        // Validate table/column against allowlist
+        const allowedCols = BatchLoader.ALLOWED_QUERIES[table];
+        if (!allowedCols || !allowedCols.includes(column)) {
+            throw new Error(`BatchLoader: disallowed table/column: ${table}.${column}`);
+        }
 
         const allRows: T[] = [];
         for (let i = 0; i < ids.length; i += CHUNK_SIZE) {

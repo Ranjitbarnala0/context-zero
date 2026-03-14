@@ -267,8 +267,23 @@ export class Ingestor {
 
         // Accumulate symbol version INSERT statements for batching
         const svInsertStatements: { text: string; params: unknown[] }[] = [];
-        // Track symbol version IDs and their corresponding symbols for post-batch processing
-        const svEntries: { svId: string; sym: ExtractedSymbol }[] = [];
+
+        // File content cache — read each source file at most once for body_source extraction.
+        // Keyed by absolute path to avoid symlink/aliasing cache misses.
+        const fileContentCache = new Map<string, string[] | null>();
+        const getFileLines = (filePath: string): string[] | null => {
+            const abs = path.isAbsolute(filePath) ? filePath : path.resolve(repoPath, filePath);
+            if (fileContentCache.has(abs)) return fileContentCache.get(abs)!;
+            try {
+                const lines = fs.readFileSync(abs, 'utf-8').split('\n');
+                fileContentCache.set(abs, lines);
+                return lines;
+            } catch (err) {
+                log.warn('Failed to read file for body_source extraction', { filePath: abs, error: err instanceof Error ? err.message : String(err) });
+                fileContentCache.set(abs, null);
+                return null;
+            }
+        };
 
         // Phase 0: Normalize ALL keys in the extraction result to relative paths.
         // Adapters may return absolute paths (e.g., "/home/user/repo/src/file.ts#Func").
@@ -329,6 +344,18 @@ export class Ingestor {
             const fileId = fileResult.rows[0]?.file_id as string;
             if (!fileId) continue;
 
+            // Extract body source from file using line ranges
+            const lines = getFileLines(stableKeyPath);
+            let bodySource: string | null = null;
+            if (lines && sym.range_start_line >= 1 && sym.range_end_line >= sym.range_start_line) {
+                const start = Math.max(0, sym.range_start_line - 1);
+                const end = Math.min(lines.length, sym.range_end_line);
+                let raw = lines.slice(start, end).join('\n');
+                // Strip null bytes — they corrupt PostgreSQL TEXT columns
+                if (raw.includes('\0')) raw = raw.replace(/\0/g, '');
+                bodySource = raw;
+            }
+
             const svId = crypto.randomUUID();
             svInsertStatements.push({
                 text: `
@@ -336,8 +363,8 @@ export class Ingestor {
                         symbol_version_id, symbol_id, snapshot_id, file_id,
                         range_start_line, range_start_col, range_end_line, range_end_col,
                         signature, ast_hash, body_hash, normalized_ast_hash,
-                        summary, visibility, language, uncertainty_flags
-                    ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16)
+                        summary, body_source, visibility, language, uncertainty_flags
+                    ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17)
                     ON CONFLICT (symbol_id, snapshot_id) DO UPDATE SET
                         file_id = EXCLUDED.file_id,
                         range_start_line = EXCLUDED.range_start_line,
@@ -349,6 +376,7 @@ export class Ingestor {
                         body_hash = EXCLUDED.body_hash,
                         normalized_ast_hash = EXCLUDED.normalized_ast_hash,
                         summary = EXCLUDED.summary,
+                        body_source = EXCLUDED.body_source,
                         visibility = EXCLUDED.visibility,
                         language = EXCLUDED.language,
                         uncertainty_flags = EXCLUDED.uncertainty_flags
@@ -357,7 +385,7 @@ export class Ingestor {
                     svId, symbolId, snapshotId, fileId,
                     sym.range_start_line, sym.range_start_col, sym.range_end_line, sym.range_end_col,
                     sym.signature, sym.ast_hash, sym.body_hash, sym.normalized_ast_hash || null,
-                    sym.summary || '', sym.visibility, language,
+                    sym.summary || '', bodySource, sym.visibility, language,
                     // Only propagate file-level uncertainty flags to symbols.
                     // Function-specific flags (call_extraction_failure, normalization_failure,
                     // type_inference_failure) are per-symbol and should not be broadcast
@@ -546,7 +574,13 @@ export class Ingestor {
         const files: string[] = [];
 
         function walk(dir: string): void {
-            const entries = fs.readdirSync(dir, { withFileTypes: true });
+            let entries: fs.Dirent[];
+            try {
+                entries = fs.readdirSync(dir, { withFileTypes: true });
+            } catch {
+                // Directory unreadable (permissions, deleted mid-scan) — skip gracefully
+                return;
+            }
             for (const entry of entries) {
                 const entryPath = path.join(dir, entry.name);
 
@@ -585,8 +619,14 @@ export class Ingestor {
     }
 
     private hashFile(filePath: string): string {
-        const content = fs.readFileSync(filePath);
-        return crypto.createHash('sha256').update(content).digest('hex');
+        try {
+            const content = fs.readFileSync(filePath);
+            return crypto.createHash('sha256').update(content).digest('hex');
+        } catch {
+            // File deleted/unreadable between discovery and hashing — return empty hash
+            log.warn('File unreadable during hashing — may have been deleted', { filePath });
+            return crypto.createHash('sha256').update('').digest('hex');
+        }
     }
 
     /**

@@ -45,6 +45,7 @@ function makeTargetSymbolRow(overrides?: Partial<{
         file_path: 'src/services/user.ts',
         range_start_line: 10,
         range_end_line: 25,
+        body_source: 'async function getUserById(userId: string): Promise<User> {\n  return db.query("SELECT * FROM users WHERE id = $1", [userId]);\n}',
         uncertainty_flags: [],
         ...overrides,
     };
@@ -58,6 +59,7 @@ function makeDependencyRows(count: number, summarySize: number = 50) {
             canonical_name: `dependency_${i}`,
             signature: `dep${i}(x: number): void`,
             summary: 'A'.repeat(summarySize),
+            body_source: `function dep${i}(x: number): void { /* body */ }`,
             relation_type: 'calls',
             confidence: 0.9 - i * 0.01,
         });
@@ -73,6 +75,7 @@ function makeCallerRows(count: number, summarySize: number = 50) {
             canonical_name: `caller_${i}`,
             signature: `caller${i}(): void`,
             summary: 'B'.repeat(summarySize),
+            body_source: `function caller${i}(): void { /* body */ }`,
             confidence: 0.85 - i * 0.01,
         });
     }
@@ -112,6 +115,7 @@ function makeHomologRows(count: number) {
             confidence: 0.8 - i * 0.02,
             canonical_name: `homolog_${i}`,
             signature: `homolog${i}(id: string): Promise<Entity>`,
+            body_source: `async function homolog${i}(id: string): Promise<Entity> { return db.find(id); }`,
         });
     }
     return rows;

@@ -87,10 +87,12 @@ export class BlastRadiusEngine {
             const placeholders = frontier.map((_, i) => `$${i + 1}`).join(',');
             const result = await db.query(`
                 SELECT sr.src_symbol_version_id, sr.relation_type, sr.confidence,
-                       s.canonical_name, sv.symbol_id
+                       s.canonical_name, sv.symbol_id,
+                       f.path as file_path, sv.range_start_line, sv.range_end_line
                 FROM structural_relations sr
                 JOIN symbol_versions sv ON sv.symbol_version_id = sr.src_symbol_version_id
                 JOIN symbols s ON s.symbol_id = sv.symbol_id
+                JOIN files f ON f.file_id = sv.file_id
                 WHERE sr.dst_symbol_version_id IN (${placeholders})
                 AND sr.src_symbol_version_id != ALL($${frontier.length + 1}::uuid[])
             `, [...frontier, visitedArray]);
@@ -103,6 +105,9 @@ export class BlastRadiusEngine {
                 confidence: number;
                 canonical_name: string;
                 symbol_id: string;
+                file_path: string;
+                range_start_line: number;
+                range_end_line: number;
             }[]) {
                 if (visited.has(row.src_symbol_version_id)) continue;
                 visited.add(row.src_symbol_version_id);
@@ -111,6 +116,9 @@ export class BlastRadiusEngine {
                 impacts.push({
                     symbol_id: row.symbol_id,
                     symbol_name: row.canonical_name,
+                    file_path: row.file_path,
+                    start_line: row.range_start_line,
+                    end_line: row.range_end_line,
                     impact_type: 'structural',
                     relation_type: row.relation_type,
                     confidence: row.confidence * (1 - d * 0.2),
@@ -140,10 +148,12 @@ export class BlastRadiusEngine {
         // Get behavioral profiles of callers of target symbols
         const result = await db.query(`
             SELECT sr.src_symbol_version_id, s.canonical_name, sv.symbol_id,
+                   f.path as file_path, sv.range_start_line, sv.range_end_line,
                    bp.purity_class, bp.network_calls, bp.db_writes
             FROM structural_relations sr
             JOIN symbol_versions sv ON sv.symbol_version_id = sr.src_symbol_version_id
             JOIN symbols s ON s.symbol_id = sv.symbol_id
+            JOIN files f ON f.file_id = sv.file_id
             LEFT JOIN behavioral_profiles bp ON bp.symbol_version_id = sr.src_symbol_version_id
             WHERE sr.dst_symbol_version_id IN (${placeholders})
             AND sr.relation_type IN ('calls', 'references')
@@ -153,6 +163,9 @@ export class BlastRadiusEngine {
             src_symbol_version_id: string;
             canonical_name: string;
             symbol_id: string;
+            file_path: string;
+            range_start_line: number;
+            range_end_line: number;
             purity_class: string | null;
             network_calls: string[] | null;
             db_writes: string[] | null;
@@ -164,6 +177,9 @@ export class BlastRadiusEngine {
                 impacts.push({
                     symbol_id: row.symbol_id,
                     symbol_name: row.canonical_name,
+                    file_path: row.file_path,
+                    start_line: row.range_start_line,
+                    end_line: row.range_end_line,
                     impact_type: 'behavioral',
                     relation_type: 'purity_assumption',
                     confidence: 0.80,
@@ -188,13 +204,17 @@ export class BlastRadiusEngine {
 
         const placeholders = targetIds.map((_, i) => `$${i + 1}`).join(',');
 
-        // Find invariants scoped to the target symbols
+        // Find invariants scoped to the target symbols.
+        // The join path: target symbol_version_ids → symbol_versions → symbols → invariants.
+        // We constrain sv to the exact target versions (not arbitrary versions of the same symbol).
         const result = await db.query(`
             SELECT i.invariant_id, i.expression, i.source_type, i.strength,
-                   s.canonical_name, s.symbol_id
-            FROM invariants i
-            JOIN symbols s ON s.symbol_id = i.scope_symbol_id
-            JOIN symbol_versions sv ON sv.symbol_id = s.symbol_id
+                   s.canonical_name, s.symbol_id,
+                   f.path as file_path, sv.range_start_line, sv.range_end_line
+            FROM symbol_versions sv
+            JOIN symbols s ON s.symbol_id = sv.symbol_id
+            JOIN invariants i ON i.scope_symbol_id = s.symbol_id
+            JOIN files f ON f.file_id = sv.file_id
             WHERE sv.symbol_version_id IN (${placeholders})
         `, targetIds);
 
@@ -205,10 +225,16 @@ export class BlastRadiusEngine {
             strength: number;
             canonical_name: string;
             symbol_id: string;
+            file_path: string;
+            range_start_line: number;
+            range_end_line: number;
         }[]) {
             impacts.push({
                 symbol_id: row.symbol_id,
                 symbol_name: row.canonical_name,
+                file_path: row.file_path,
+                start_line: row.range_start_line,
+                end_line: row.range_end_line,
                 impact_type: 'contract',
                 relation_type: `invariant:${row.source_type}`,
                 confidence: row.strength,
@@ -235,13 +261,16 @@ export class BlastRadiusEngine {
 
         const result = await db.query(`
             SELECT ir.dst_symbol_version_id, ir.relation_type, ir.confidence,
-                   s.canonical_name, sv.symbol_id
+                   s.canonical_name, sv.symbol_id,
+                   f.path as file_path, sv.range_start_line, sv.range_end_line
             FROM inferred_relations ir
             JOIN symbol_versions sv ON sv.symbol_version_id = ir.dst_symbol_version_id
             JOIN symbols s ON s.symbol_id = sv.symbol_id
+            JOIN files f ON f.file_id = sv.file_id
             WHERE ir.src_symbol_version_id IN (${placeholders})
             AND ir.confidence >= 0.60
             AND ir.review_state != 'rejected'
+            AND ir.valid_to_snapshot_id IS NULL
         `, targetIds);
 
         for (const row of result.rows as {
@@ -250,10 +279,16 @@ export class BlastRadiusEngine {
             confidence: number;
             canonical_name: string;
             symbol_id: string;
+            file_path: string;
+            range_start_line: number;
+            range_end_line: number;
         }[]) {
             impacts.push({
                 symbol_id: row.symbol_id,
                 symbol_name: row.canonical_name,
+                file_path: row.file_path,
+                start_line: row.range_start_line,
+                end_line: row.range_end_line,
                 impact_type: 'homolog',
                 relation_type: row.relation_type,
                 confidence: row.confidence,
@@ -281,13 +316,16 @@ export class BlastRadiusEngine {
 
         const result = await db.query(`
             SELECT ir.dst_symbol_version_id, ir.confidence,
-                   s.canonical_name, sv.symbol_id
+                   s.canonical_name, sv.symbol_id,
+                   f.path as file_path, sv.range_start_line, sv.range_end_line
             FROM inferred_relations ir
             JOIN symbol_versions sv ON sv.symbol_version_id = ir.dst_symbol_version_id
             JOIN symbols s ON s.symbol_id = sv.symbol_id
+            JOIN files f ON f.file_id = sv.file_id
             WHERE ir.src_symbol_version_id IN (${placeholders})
             AND ir.relation_type = 'co_changed_with'
             AND ir.confidence >= 0.50
+            AND ir.valid_to_snapshot_id IS NULL
         `, targetIds);
 
         for (const row of result.rows as {
@@ -295,10 +333,16 @@ export class BlastRadiusEngine {
             confidence: number;
             canonical_name: string;
             symbol_id: string;
+            file_path: string;
+            range_start_line: number;
+            range_end_line: number;
         }[]) {
             impacts.push({
                 symbol_id: row.symbol_id,
                 symbol_name: row.canonical_name,
+                file_path: row.file_path,
+                start_line: row.range_start_line,
+                end_line: row.range_end_line,
                 impact_type: 'historical',
                 relation_type: 'co_changed_with',
                 confidence: row.confidence,

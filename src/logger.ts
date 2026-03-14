@@ -57,7 +57,13 @@ export class Logger {
 
     private emit(entry: LogEntry): void {
         if (!this.shouldLog(entry.level)) return;
-        const output = JSON.stringify(entry);
+        let output: string;
+        try {
+            output = JSON.stringify(entry);
+        } catch {
+            // Circular reference or non-serializable data — strip the data field
+            output = JSON.stringify({ ...entry, data: { _serialization_error: true } });
+        }
         // All log output goes to stderr. This prevents structured log JSON
         // from corrupting the MCP stdio transport (which uses stdout for
         // JSON-RPC). For the REST API server, stderr is the standard

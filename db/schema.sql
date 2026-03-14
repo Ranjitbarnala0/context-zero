@@ -63,6 +63,7 @@ CREATE TABLE symbol_versions (
     body_hash VARCHAR(64) NOT NULL,
     normalized_ast_hash VARCHAR(64),
     summary TEXT,
+    body_source TEXT,
     visibility VARCHAR(50) NOT NULL,
     language VARCHAR(50) NOT NULL,
     uncertainty_flags TEXT[],

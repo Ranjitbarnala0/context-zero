@@ -2,7 +2,7 @@
  * ContextZero — MCP Stdio Bridge
  *
  * Entry point for the Model Context Protocol stdio transport.
- * Creates an MCP Server, registers all 22 ContextZero tools, and
+ * Creates an MCP Server, registers all 27 ContextZero tools, and
  * connects via StdioServerTransport (JSON-RPC over stdin/stdout).
  *
  * All logging goes to stderr — stdout is reserved for the MCP protocol.
@@ -44,6 +44,8 @@ import {
     handleReadSource,
     handleSearchCode,
     handleCodebaseOverview,
+    handleSemanticSearch,
+    handleSmartContext,
 } from './handlers';
 
 // ────────── MCP-Safe Logger (stderr only) ──────────
@@ -439,18 +441,19 @@ server.registerTool(
     async (args) => safeTool(handlePersistHomologs)(args as unknown as Record<string, unknown>),
 );
 
-// Tool 23: Read Source Code
+// Tool 23: Read Source Code (DB-first, batch-capable)
 server.registerTool(
     'scg_read_source',
     {
-        description: 'Read actual source code — by symbol version ID (shows the symbol\'s code with context) or by file path (shows file content). Essential for deep code audits through MCP.',
+        description: 'Read source code from DB — by symbol_version_id (single), symbol_version_ids (batch, up to 20), or file_path (disk). Batch mode returns all symbols in one call (~500 tokens each vs ~5000 for full file). Prefer batch mode for multi-symbol lookups.',
         inputSchema: {
             repo_id: z.string().uuid().describe('Repository UUID'),
-            symbol_version_id: z.string().uuid().optional().describe('Symbol version UUID — reads the symbol\'s source code with line numbers'),
-            file_path: z.string().optional().describe('Relative file path within the repo — reads the file content'),
-            start_line: z.number().int().min(1).optional().describe('Start line (1-indexed). Default: symbol start or file start'),
-            end_line: z.number().int().min(1).optional().describe('End line (1-indexed). Default: symbol end or file end'),
-            context_lines: z.number().int().min(0).max(50).optional().describe('Extra context lines around symbol (default 0, max 50)'),
+            symbol_version_id: z.string().uuid().optional().describe('Single symbol version UUID'),
+            symbol_version_ids: z.array(z.string().uuid()).max(20).optional().describe('Batch: array of symbol version UUIDs (max 20)'),
+            file_path: z.string().optional().describe('Relative file path within the repo (disk fallback)'),
+            start_line: z.number().int().min(1).optional().describe('Start line for file mode'),
+            end_line: z.number().int().min(1).optional().describe('End line for file mode'),
+            context_lines: z.number().int().min(0).max(50).optional().describe('Extra context lines around symbol (default 0)'),
         },
     },
     async (args) => safeTool(handleReadSource)(args as unknown as Record<string, unknown>),
@@ -485,6 +488,37 @@ server.registerTool(
     async (args) => safeTool(handleCodebaseOverview)(args as unknown as Record<string, unknown>),
 );
 
+// Tool 26: Semantic Search (body-content TF-IDF search)
+server.registerTool(
+    'scg_semantic_search',
+    {
+        description: 'Search inside function bodies using semantic similarity (TF-IDF). Unlike resolve_symbol (name-only), this finds code by what it DOES. Query: "accumulate V×V matrices" or "retry with exponential backoff". Returns ranked symbols with source.',
+        inputSchema: {
+            query: z.string().max(2000).describe('Natural language or code description of what to find'),
+            snapshot_id: z.string().uuid().describe('Snapshot UUID'),
+            limit: z.number().int().min(1).max(50).optional().describe('Max results (default 15, max 50)'),
+            include_source: z.boolean().optional().describe('Include source code in results (default true)'),
+        },
+    },
+    async (args) => safeTool(handleSemanticSearch)(args as unknown as Record<string, unknown>),
+);
+
+// Tool 27: Smart Context (task-oriented context bundles)
+server.registerTool(
+    'scg_smart_context',
+    {
+        description: 'Get everything needed for a change task in ONE call. Provide target symbols + task description → returns: target source, blast radius impacts with source, homologs, tests — all token-budgeted. Replaces 8+ separate tool calls.',
+        inputSchema: {
+            task_description: z.string().describe('What change are you making and why'),
+            target_symbol_version_ids: z.array(z.string().uuid()).min(1).max(10).describe('Symbol version UUIDs being changed'),
+            snapshot_id: z.string().uuid().describe('Snapshot UUID'),
+            token_budget: z.number().int().min(1000).max(100000).optional().describe('Max tokens for response (default 20000)'),
+            depth: z.number().int().min(1).max(5).optional().describe('Blast radius search depth (default 2)'),
+        },
+    },
+    async (args) => safeTool(handleSmartContext)(args as unknown as Record<string, unknown>),
+);
+
 // ────────── Server Startup ──────────
 
 async function main(): Promise<void> {
@@ -510,7 +544,7 @@ async function main(): Promise<void> {
         log.info('MCP bridge connected and ready', {
             server: SERVER_NAME,
             version: SERVER_VERSION,
-            tools_registered: 25,
+            tools_registered: 27,
         });
     } catch (err: unknown) {
         log.error('Failed to start MCP bridge', err);

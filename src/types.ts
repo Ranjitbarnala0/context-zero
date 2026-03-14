@@ -98,6 +98,7 @@ export interface SymbolVersion {
     ast_hash: string;
     body_hash: string;
     summary: string;
+    body_source: string | null;
     visibility: Visibility;
     language: string;
     uncertainty_flags: string[];
@@ -224,6 +225,9 @@ export interface SymbolCandidate {
 export interface BlastRadiusImpact {
     symbol_id: string;
     symbol_name: string;
+    file_path: string | null;
+    start_line: number | null;
+    end_line: number | null;
     impact_type: 'structural' | 'behavioral' | 'contract' | 'homolog' | 'historical';
     relation_type: string;
     confidence: number;
