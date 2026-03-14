@@ -136,10 +136,10 @@ export class ContractEngine {
             // Mine from behavioral profiles: functions that explicitly validate
             // inputs express implicit invariants
             const bpResult = await db.query(
-                `SELECT validation_operations FROM behavioral_profiles WHERE symbol_version_id = $1`,
+                `SELECT validation_operations, exception_profile, purity_class, resource_touches FROM behavioral_profiles WHERE symbol_version_id = $1`,
                 [sv.symbol_version_id]
             );
-            const bp = bpResult.rows[0] as { validation_operations: string[] } | undefined;
+            const bp = bpResult.rows[0] as { validation_operations: string[]; exception_profile: string[]; purity_class: string; resource_touches: string[] } | undefined;
             if (bp?.validation_operations && bp.validation_operations.length > 0) {
                 statements.push({
                     text: `INSERT INTO invariants (invariant_id, repo_id, scope_symbol_id, scope_level, expression, source_type, strength, validation_method, last_verified_snapshot_id)
@@ -180,6 +180,41 @@ export class ContractEngine {
                         'derived', 0.85, 'contract_inference', snapshotId],
                 });
                 count++;
+            }
+
+            // Mine from exception profiles: functions that throw specific exceptions
+            // express invariants about error conditions
+            if (bp?.exception_profile) {
+                const arr = Array.isArray(bp.exception_profile) ? bp.exception_profile : [];
+                const throwPatterns = arr.filter((e: string) => e.startsWith('throws:'));
+                if (throwPatterns.length > 0) {
+                    statements.push({
+                        text: `INSERT INTO invariants (invariant_id, repo_id, scope_symbol_id, scope_level, expression, source_type, strength, validation_method, last_verified_snapshot_id)
+                               VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
+                               ON CONFLICT DO NOTHING`,
+                        params: [uuidv4(), repoId, sv.symbol_id, 'symbol',
+                            `exception:${sv.canonical_name} raises ${throwPatterns.map((t: string) => t.replace('throws:', '')).join(', ')}`,
+                            'derived', 0.80, 'behavioral_inference', snapshotId],
+                    });
+                    count++;
+                }
+            }
+
+            // Mine from purity classification: non-pure functions touching
+            // specific resources express implicit resource-access invariants
+            if (bp?.purity_class && bp.purity_class !== 'pure') {
+                const resources = Array.isArray(bp.resource_touches) ? bp.resource_touches : [];
+                if (resources.length > 0) {
+                    statements.push({
+                        text: `INSERT INTO invariants (invariant_id, repo_id, scope_symbol_id, scope_level, expression, source_type, strength, validation_method, last_verified_snapshot_id)
+                               VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
+                               ON CONFLICT DO NOTHING`,
+                        params: [uuidv4(), repoId, sv.symbol_id, 'symbol',
+                            `resource_access:${sv.canonical_name} (${bp.purity_class}) touches ${resources.slice(0, 5).join(', ')}`,
+                            'derived', 0.65, 'behavioral_inference', snapshotId],
+                    });
+                    count++;
+                }
             }
         }
 

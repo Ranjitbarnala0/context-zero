@@ -65,6 +65,11 @@ BEHAVIOR_PATTERNS: List[Dict[str, str]] = [
     {"pattern": r"os\.(remove|rename|makedirs|mkdir|rmdir|listdir|walk)\s*\(", "hint_type": "file_io", "detail": "os_fs"},
     {"pattern": r"shutil\.", "hint_type": "file_io", "detail": "shutil"},
     {"pattern": r"tempfile\.", "hint_type": "file_io", "detail": "tempfile"},
+    {"pattern": r"torch\.(save|load)\s*\(", "hint_type": "file_io", "detail": "torch_io"},
+    {"pattern": r"pickle\.(dump|load)\s*\(", "hint_type": "file_io", "detail": "pickle"},
+    {"pattern": r"json\.(dump|load)\s*\(", "hint_type": "file_io", "detail": "json_io"},
+    {"pattern": r"np\.(save|load|savez|loadtxt|savetxt)\s*\(", "hint_type": "file_io", "detail": "numpy_io"},
+    {"pattern": r"pd\.(read_csv|read_excel|read_json|to_csv|to_excel)\s*\(", "hint_type": "file_io", "detail": "pandas_io"},
     # Cache operations
     {"pattern": r"cache\.(get|set|delete|clear|invalidate)\s*\(", "hint_type": "cache_op", "detail": "cache_operation"},
     {"pattern": r"redis\.(get|set|hget|hset|del|setex|expire)\s*\(", "hint_type": "cache_op", "detail": "redis"},
