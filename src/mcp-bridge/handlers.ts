@@ -633,7 +633,6 @@ export async function handleReadSource(args: Record<string, unknown>, log: McpLo
     const file_path = args.file_path as string | undefined;
     const start_line = typeof args.start_line === 'number' ? args.start_line : undefined;
     const end_line = typeof args.end_line === 'number' ? args.end_line : undefined;
-    const context_lines = typeof args.context_lines === 'number' ? Math.min(args.context_lines, 50) : 0;
 
     if (!isUUID(repo_id)) return errorResult('repo_id is required and must be a valid UUID');
 
@@ -1028,7 +1027,7 @@ export async function handleSemanticSearch(args: Record<string, unknown>, log: M
         [snapshot_id],
     );
 
-    let queryIDF: Record<string, number> = {};
+    const queryIDF: Record<string, number> = {};
     if (idfResult.rows.length > 0) {
         const docCounts: Record<string, number> =
             typeof idfResult.rows[0].token_document_counts === 'string'
@@ -1244,7 +1243,7 @@ export async function handleSmartContext(args: Record<string, unknown>, log: Mcp
     }
 
     // Load body_source for impacted symbols (by symbol_id, matching snapshot)
-    let impactSourceMap = new Map<string, { body_source: string | null; canonical_name: string; kind: string; file_path: string; start_line: number; end_line: number }>();
+    const impactSourceMap = new Map<string, { body_source: string | null; canonical_name: string; kind: string; file_path: string; start_line: number; end_line: number }>();
     if (impactSvIds.length > 0) {
         const impPlaceholders = impactSvIds.map((_, i) => `$${i + 2}`).join(',');
         const impResult = await db.query(`

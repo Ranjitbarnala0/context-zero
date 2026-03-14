@@ -850,8 +850,7 @@ app.post('/scg_read_source',
     }),
     safeHandler(async (req, res) => {
         const { repo_id, symbol_version_id, symbol_version_ids,
-                file_path: reqFilePath, context_lines: rawCtx } = req.body;
-        const context_lines = typeof rawCtx === 'number' ? Math.min(Math.max(rawCtx, 0), 50) : 0;
+                file_path: reqFilePath } = req.body;
 
         // Batch mode: multiple symbol_version_ids served from DB
         const ids: string[] = [];
@@ -1001,7 +1000,7 @@ app.post('/scg_codebase_overview',
         snapshot_id: requireUUID,
     }),
     safeHandler(async (req, res) => {
-        const { repo_id, snapshot_id } = req.body;
+        const { snapshot_id } = req.body;
 
         // File structure
         const filesResult = await db.query(`SELECT path, language FROM files WHERE snapshot_id = $1 ORDER BY path`, [snapshot_id]);
@@ -1102,7 +1101,7 @@ app.post('/scg_semantic_search',
             `SELECT document_count, token_document_counts FROM idf_corpus WHERE snapshot_id = $1 AND view_type = 'body'`,
             [snapshot_id],
         );
-        let queryIDF: Record<string, number> = {};
+        const queryIDF: Record<string, number> = {};
         if (idfResult.rows.length > 0) {
             const docCounts: Record<string, number> = typeof idfResult.rows[0].token_document_counts === 'string'
                 ? JSON.parse(idfResult.rows[0].token_document_counts) : idfResult.rows[0].token_document_counts;
@@ -1246,7 +1245,7 @@ app.post('/scg_smart_context',
 
         // Load source for impacted symbols
         const impactSymIds = rankedImpacts.map(i => i.symbol_id);
-        let impactSourceMap = new Map<string, Record<string, unknown>>();
+        const impactSourceMap = new Map<string, Record<string, unknown>>();
         if (impactSymIds.length > 0) {
             const impPH = impactSymIds.map((_, i) => `$${i + 2}`).join(',');
             const impResult = await db.query(`
