@@ -71,7 +71,7 @@ describe('Logger', () => {
         expect(completion.data.result).toBe('ok');
     });
 
-    test('routes error and fatal to stderr', () => {
+    test('routes all log output to stderr (MCP-safe)', () => {
         const stdoutCalls: string[] = [];
         const stderrCalls: string[] = [];
 
@@ -89,7 +89,8 @@ describe('Logger', () => {
         log.error('error msg');
         log.fatal('fatal msg');
 
-        expect(stdoutCalls.length).toBe(1);
-        expect(stderrCalls.length).toBe(2);
+        // All output goes to stderr to prevent corrupting MCP stdio transport
+        expect(stdoutCalls.length).toBe(0);
+        expect(stderrCalls.length).toBe(3);
     });
 });

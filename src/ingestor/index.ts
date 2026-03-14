@@ -288,7 +288,13 @@ export class Ingestor {
                     sym.range_start_line, sym.range_start_col, sym.range_end_line, sym.range_end_col,
                     sym.signature, sym.ast_hash, sym.body_hash, sym.normalized_ast_hash || null,
                     '', sym.visibility, language,
-                    extraction.uncertainty_flags || []
+                    // Only propagate file-level uncertainty flags to symbols.
+                    // Function-specific flags (call_extraction_failure, normalization_failure,
+                    // type_inference_failure) are per-symbol and should not be broadcast
+                    // to every symbol in the file.
+                    (extraction.uncertainty_flags || []).filter(f =>
+                        f === 'parse_error' || f === 'encoding_fallback' || f === 'extraction_error'
+                    )
                 ],
             });
             svEntries.push({ svId, sym });
@@ -354,6 +360,35 @@ export class Ingestor {
             if (!parsed || !Array.isArray(parsed.symbols)) {
                 log.warn('Python extractor returned invalid structure', { file: filePath });
                 return null;
+            }
+
+            // Normalize stable keys: the Python extractor uses the absolute file
+            // path passed via CLI, but the DB stores relative paths. Rewrite all
+            // stable keys from "/abs/path/to/file.py#Name" → "relative/file.py#Name"
+            const relativePath = path.relative(repoPath, filePath);
+            for (const sym of parsed.symbols) {
+                const hashIdx = sym.stable_key.indexOf('#');
+                if (hashIdx >= 0) {
+                    sym.stable_key = relativePath + sym.stable_key.substring(hashIdx);
+                }
+            }
+            for (const rel of parsed.relations) {
+                const srcHash = rel.source_key.indexOf('#');
+                if (srcHash >= 0) {
+                    rel.source_key = relativePath + rel.source_key.substring(srcHash);
+                }
+            }
+            for (const hint of parsed.behavior_hints) {
+                const hintHash = hint.symbol_key.indexOf('#');
+                if (hintHash >= 0) {
+                    hint.symbol_key = relativePath + hint.symbol_key.substring(hintHash);
+                }
+            }
+            for (const hint of parsed.contract_hints) {
+                const hintHash = hint.symbol_key.indexOf('#');
+                if (hintHash >= 0) {
+                    hint.symbol_key = relativePath + hint.symbol_key.substring(hintHash);
+                }
             }
 
             return parsed;

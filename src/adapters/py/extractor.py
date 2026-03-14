@@ -668,11 +668,20 @@ class FullExtractor(cst.CSTVisitor):
             self._function_stack.pop()
 
     def _extract_calls_from_body(self, node: cst.FunctionDef, source_key: str):
-        """Walk a FunctionDef body to find call expressions."""
+        """Walk a FunctionDef body to find call expressions.
+
+        Uses two strategies:
+        1. Primary: LibCST visitor walk on the function body subtree
+        2. Fallback: Regex-based call extraction from source text
+
+        If the visitor walk fails (some LibCST versions have issues with
+        subtree walking), the regex fallback ensures we still extract calls.
+        """
         if node.body is None:
             return
 
         seen_calls: Set[str] = set()
+        extraction_succeeded = False
 
         class BodyCallVisitor(cst.CSTVisitor):
             def __init__(self, extractor: 'FullExtractor'):
@@ -698,8 +707,34 @@ class FullExtractor(cst.CSTVisitor):
         try:
             visitor = BodyCallVisitor(self)
             node.body.walk(visitor)
+            extraction_succeeded = True
         except Exception:
-            self.uncertainty_flags.append("call_extraction_failure")
+            pass  # Fall through to regex fallback
+
+        # Fallback: regex-based call extraction from source text
+        if not extraction_succeeded:
+            try:
+                pos = self.get_metadata(PositionProvider, node)
+                body_text = self._get_node_text(pos)
+                # Match function calls: identifier( or dotted.name(
+                call_pattern = re.compile(r'(?<!\bdef\s)(?<!\bclass\s)\b([a-zA-Z_][a-zA-Z0-9_.]*)\s*\(')
+                for m in call_pattern.finditer(body_text):
+                    target = m.group(1)
+                    # Skip keywords and built-in control flow
+                    if target in ('if', 'for', 'while', 'with', 'assert', 'return',
+                                  'yield', 'raise', 'except', 'print', 'not', 'and',
+                                  'or', 'in', 'is', 'lambda', 'del'):
+                        continue
+                    if target not in seen_calls:
+                        seen_calls.add(target)
+                        self.relations.append({
+                            "source_key": source_key,
+                            "target_name": target,
+                            "relation_type": "calls",
+                        })
+            except Exception:
+                # Only flag as failure if BOTH strategies failed
+                self.uncertainty_flags.append("call_extraction_failure")
 
     def _collect_raised_exceptions(self, node) -> List[str]:
         """Collect exception type names from raise statements using a visitor."""

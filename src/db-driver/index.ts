@@ -9,7 +9,7 @@ import { Pool, PoolClient, QueryResult } from 'pg';
 import * as dotenv from 'dotenv';
 import { Logger } from '../logger';
 
-dotenv.config();
+dotenv.config({ quiet: true });
 
 const log = new Logger('db-driver');
 

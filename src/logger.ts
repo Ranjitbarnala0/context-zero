@@ -58,15 +58,11 @@ export class Logger {
     private emit(entry: LogEntry): void {
         if (!this.shouldLog(entry.level)) return;
         const output = JSON.stringify(entry);
-        switch (entry.level) {
-            case 'error':
-            case 'fatal':
-                process.stderr.write(output + '\n');
-                break;
-            default:
-                process.stdout.write(output + '\n');
-                break;
-        }
+        // All log output goes to stderr. This prevents structured log JSON
+        // from corrupting the MCP stdio transport (which uses stdout for
+        // JSON-RPC). For the REST API server, stderr is the standard
+        // destination for application logs (12-factor app methodology).
+        process.stderr.write(output + '\n');
     }
 
     public debug(message: string, data?: Record<string, unknown>): void {
