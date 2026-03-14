@@ -242,8 +242,37 @@ export class Ingestor {
         // Track symbol version IDs and their corresponding symbols for post-batch processing
         const svEntries: { svId: string; sym: ExtractedSymbol }[] = [];
 
-        // Phase 1: Merge symbols and prepare batch inserts
+        // Phase 0: Normalize ALL keys in the extraction result to relative paths.
+        // Adapters may return absolute paths (e.g., "/home/user/repo/src/file.ts#Func").
+        // The DB stores relative paths ("src/file.ts"). Normalize everything up front.
+        const normalizeKey = (key: string): string => {
+            const hashIdx = key.indexOf('#');
+            const filePart = hashIdx >= 0 ? key.substring(0, hashIdx) : key;
+            if (path.isAbsolute(filePart)) {
+                const relPart = path.relative(repoPath, filePart);
+                return hashIdx >= 0 ? relPart + key.substring(hashIdx) : relPart;
+            }
+            return key;
+        };
+        for (const rel of extraction.relations) {
+            rel.source_key = normalizeKey(rel.source_key);
+        }
+        for (const hint of extraction.behavior_hints) {
+            hint.symbol_key = normalizeKey(hint.symbol_key);
+        }
+        for (const hint of extraction.contract_hints) {
+            hint.symbol_key = normalizeKey(hint.symbol_key);
+        }
+
+        // Phase 1: Merge symbols and batch insert.
         for (const sym of extraction.symbols) {
+            let stableKeyPath = sym.stable_key.split('#')[0] || '';
+            if (path.isAbsolute(stableKeyPath)) {
+                stableKeyPath = path.relative(repoPath, stableKeyPath);
+                const hashIdx = sym.stable_key.indexOf('#');
+                sym.stable_key = stableKeyPath + (hashIdx >= 0 ? sym.stable_key.substring(hashIdx) : '');
+            }
+
             const symbolId = await coreDataService.mergeSymbol({
                 repo_id: repoId,
                 stable_key: sym.stable_key,
@@ -251,7 +280,7 @@ export class Ingestor {
                 kind: sym.kind,
             });
 
-            const relativePath = sym.stable_key.split('#')[0] || '';
+            const relativePath = stableKeyPath;
             const fileResult = await db.query(
                 `SELECT file_id FROM files WHERE snapshot_id = $1 AND path = $2`,
                 [snapshotId, relativePath]
@@ -363,34 +392,8 @@ export class Ingestor {
                 return null;
             }
 
-            // Normalize stable keys: the Python extractor uses the absolute file
-            // path passed via CLI, but the DB stores relative paths. Rewrite all
-            // stable keys from "/abs/path/to/file.py#Name" → "relative/file.py#Name"
-            const relativePath = path.relative(repoPath, filePath);
-            for (const sym of parsed.symbols) {
-                const hashIdx = sym.stable_key.indexOf('#');
-                if (hashIdx >= 0) {
-                    sym.stable_key = relativePath + sym.stable_key.substring(hashIdx);
-                }
-            }
-            for (const rel of parsed.relations) {
-                const srcHash = rel.source_key.indexOf('#');
-                if (srcHash >= 0) {
-                    rel.source_key = relativePath + rel.source_key.substring(srcHash);
-                }
-            }
-            for (const hint of parsed.behavior_hints) {
-                const hintHash = hint.symbol_key.indexOf('#');
-                if (hintHash >= 0) {
-                    hint.symbol_key = relativePath + hint.symbol_key.substring(hintHash);
-                }
-            }
-            for (const hint of parsed.contract_hints) {
-                const hintHash = hint.symbol_key.indexOf('#');
-                if (hintHash >= 0) {
-                    hint.symbol_key = relativePath + hint.symbol_key.substring(hintHash);
-                }
-            }
+            // Key normalization is now handled centrally in persistExtractionResult
+            // (Phase 0) — no per-adapter normalization needed.
 
             return parsed;
         } catch (err) {
