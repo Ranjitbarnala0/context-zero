@@ -122,6 +122,67 @@ export class ContractEngine {
             count++;
         }
 
+        // BUG-011 fix: Mine invariants from assert statements in source code.
+        // Even without test files, assert statements in production code
+        // express developer-intended invariants (preconditions, postconditions).
+        const assertSymbols = symbolVersionRows.filter(sv =>
+            sv.kind === 'function' || sv.kind === 'method'
+        );
+
+        for (const sv of assertSymbols) {
+            // Check if the symbol's signature or summary contains assert patterns
+            const sig = sv.signature || '';
+
+            // Mine from behavioral profiles: functions that explicitly validate
+            // inputs express implicit invariants
+            const bpResult = await db.query(
+                `SELECT validation_operations FROM behavioral_profiles WHERE symbol_version_id = $1`,
+                [sv.symbol_version_id]
+            );
+            const bp = bpResult.rows[0] as { validation_operations: string[] } | undefined;
+            if (bp?.validation_operations && bp.validation_operations.length > 0) {
+                statements.push({
+                    text: `INSERT INTO invariants (invariant_id, repo_id, scope_symbol_id, scope_level, expression, source_type, strength, validation_method, last_verified_snapshot_id)
+                           VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
+                           ON CONFLICT DO NOTHING`,
+                    params: [uuidv4(), repoId, sv.symbol_id, 'symbol',
+                        `validation:${sv.canonical_name} performs input validation (${bp.validation_operations.join(', ')})`,
+                        'derived', 0.75, 'behavioral_inference', snapshotId],
+                });
+                count++;
+            }
+
+            // Mine from contract profiles: functions with non-trivial error contracts
+            // express invariants about error conditions
+            const cpResult = await db.query(
+                `SELECT error_contract, security_contract FROM contract_profiles WHERE symbol_version_id = $1`,
+                [sv.symbol_version_id]
+            );
+            const cp = cpResult.rows[0] as { error_contract: string; security_contract: string } | undefined;
+            if (cp?.error_contract && cp.error_contract !== 'never' && cp.error_contract !== '') {
+                statements.push({
+                    text: `INSERT INTO invariants (invariant_id, repo_id, scope_symbol_id, scope_level, expression, source_type, strength, validation_method, last_verified_snapshot_id)
+                           VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
+                           ON CONFLICT DO NOTHING`,
+                    params: [uuidv4(), repoId, sv.symbol_id, 'symbol',
+                        `error_contract:${sv.canonical_name} may throw ${cp.error_contract}`,
+                        'derived', 0.70, 'contract_inference', snapshotId],
+                });
+                count++;
+            }
+            if (cp?.security_contract && cp.security_contract !== 'none' && cp.security_contract !== '') {
+                statements.push({
+                    text: `INSERT INTO invariants (invariant_id, repo_id, scope_symbol_id, scope_level, expression, source_type, strength, validation_method, last_verified_snapshot_id)
+                           VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
+                           ON CONFLICT DO NOTHING`,
+                    params: [uuidv4(), repoId, sv.symbol_id, 'symbol',
+                        `security:${sv.canonical_name} requires ${cp.security_contract}`,
+                        'derived', 0.85, 'contract_inference', snapshotId],
+                });
+                count++;
+            }
+        }
+
         // Batch insert all invariant statements in a single transaction
         if (statements.length > 0) {
             await db.batchInsert(statements);

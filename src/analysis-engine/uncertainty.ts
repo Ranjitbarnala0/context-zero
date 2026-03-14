@@ -130,6 +130,69 @@ export class UncertaintyTracker {
             }
         }
 
+        // BUG-008 fix: Also detect structural indicators of uncertainty
+        // that aren't captured by extraction flags. The behavioral profiler
+        // uses heuristic pattern matching — flag this as inherent uncertainty.
+
+        // Check: how many symbols have behavioral profiles vs total
+        const totalSymbols = await db.query(
+            `SELECT COUNT(*) as cnt FROM symbol_versions WHERE snapshot_id = $1`,
+            [snapshotId]
+        );
+        const profiledSymbols = await db.query(
+            `SELECT COUNT(*) as cnt FROM behavioral_profiles bp
+             JOIN symbol_versions sv ON sv.symbol_version_id = bp.symbol_version_id
+             WHERE sv.snapshot_id = $1`,
+            [snapshotId]
+        );
+        const total = parseInt(totalSymbols.rows[0]?.cnt as string || '0', 10);
+        const profiled = parseInt(profiledSymbols.rows[0]?.cnt as string || '0', 10);
+
+        // If many symbols lack behavioral profiles, flag as uncertain
+        if (total > 0 && profiled < total * 0.5) {
+            const coverage = ((profiled / total) * 100).toFixed(0);
+            bySource['incomplete_behavioral_coverage'] = total - profiled;
+            totalAnnotations += 1;
+            allAnnotations.push(this.createAnnotation(
+                'untested_path' as UncertaintySource,
+                null,
+                `Only ${coverage}% of symbols have behavioral profiles (${profiled}/${total})`
+            ));
+        }
+
+        // Check: are behavioral profiles using heuristic pattern matching?
+        // (All current profiles are heuristic-based, so flag this if we have any)
+        if (profiled > 0) {
+            bySource['heuristic_behavioral_analysis'] = profiled;
+            totalAnnotations += 1;
+            allAnnotations.push({
+                source: 'config_dependent',
+                affected_symbol_id: null,
+                description: `${profiled} behavioral profiles derived from heuristic pattern matching — purity classifications may be imprecise for framework-specific code`,
+                confidence_impact: 0.05,
+                recommended_evidence: 'Add framework-specific behavioral patterns or runtime trace data',
+            });
+        }
+
+        // Check: are there symbols with no test coverage at all?
+        const testedSymbols = await db.query(
+            `SELECT COUNT(DISTINCT ta.symbol_version_id) as cnt
+             FROM test_artifacts ta
+             JOIN symbol_versions sv ON sv.symbol_version_id = ta.symbol_version_id
+             WHERE sv.snapshot_id = $1`,
+            [snapshotId]
+        );
+        const tested = parseInt(testedSymbols.rows[0]?.cnt as string || '0', 10);
+        if (total > 0 && tested === 0) {
+            bySource['no_test_coverage'] = total;
+            totalAnnotations += 1;
+            allAnnotations.push(this.createAnnotation(
+                'untested_path' as UncertaintySource,
+                null,
+                `No test artifacts found — invariant mining and test-based validation are unavailable`
+            ));
+        }
+
         return {
             total_annotations: totalAnnotations,
             by_source: bySource,

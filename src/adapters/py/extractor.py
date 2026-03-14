@@ -832,6 +832,37 @@ class FullExtractor(cst.CSTVisitor):
             # Return type annotation
             if node.returns:
                 output_type = get_annotation_string(node.returns)
+            else:
+                # BUG-004 fix: If no return type annotation, scan body for return
+                # statements to infer whether the function returns a value.
+                # This catches nested functions that return dicts, lists, etc.
+                # without type annotations.
+                try:
+                    pos = self.get_metadata(PositionProvider, node)
+                    body_text = self._get_node_text(pos)
+                    # Look for "return {" (dict), "return [" (list), "return (" (tuple),
+                    # or "return <identifier>" (variable)
+                    return_matches = re.findall(
+                        r'\breturn\s+(\{[^}]*|[\[(\w])',
+                        body_text
+                    )
+                    if return_matches:
+                        # Infer type from what follows return
+                        first = return_matches[0].strip()
+                        if first.startswith('{'):
+                            output_type = "dict"
+                        elif first.startswith('['):
+                            output_type = "list"
+                        elif first.startswith('('):
+                            output_type = "tuple"
+                        elif first == 'True' or first == 'False':
+                            output_type = "bool"
+                        elif first == 'None':
+                            output_type = ""  # stays void
+                        else:
+                            output_type = "Any"
+                except Exception:
+                    pass  # Keep output_type as ""
 
             # Decorators
             for dec in node.decorators:
