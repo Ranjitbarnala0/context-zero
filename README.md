@@ -1,3 +1,5 @@
+**[Read the Performance Benchmarks & Competitive Analysis vs. Sourcegraph, Cursor, and CodeScene](BENCHMARKS.md)**
+
 <p align="center">
   <strong>ContextZero</strong><br>
   <em>The code cognition engine that tells you what your code actually does.</em>
