@@ -1,129 +1,89 @@
-# ContextZero
+<p align="center">
+  <strong>ContextZero</strong><br>
+  <em>The code cognition engine that tells you what your code actually does.</em>
+</p>
 
-**Production-grade code cognition and change orchestration engine.**
+<p align="center">
+  <a href="#quick-start">Quick Start</a> &middot;
+  <a href="BENCHMARKS.md">Benchmarks</a> &middot;
+  <a href="ARCHITECTURE.md">Architecture</a> &middot;
+  <a href="#mcp-integration">MCP Integration</a> &middot;
+  <a href="#enterprise">Enterprise</a>
+</p>
 
-ContextZero builds a deep, versioned understanding of codebases — symbols, relations, behavioral fingerprints, contracts, invariants, and homolog relationships — then uses that understanding to power safe, validated code changes.
-
-Unlike traditional code search or chunk-based RAG, ContextZero operates on **exact versioned symbols**, **evidence-backed inference**, and **transactional editing** — giving AI coding agents the precision substrate they need to modify code safely at scale.
-
-### Why ContextZero
-
-| Problem | How ContextZero solves it |
-|---|---|
-| **AI reads too much code** | Context capsules deliver the minimum sufficient code for a task — not whole files, not arbitrary chunks. Typical 60-80% reduction in tokens sent to the model. |
-| **AI edits break things silently** | 5-dimensional blast radius analysis catches structural, behavioral, contract, homolog, and historical impacts before code ships. |
-| **Duplicate logic hides across the codebase** | 7-dimension homolog detection finds parallel validators, mirrored auth logic, and copy-pasted business rules — even when they share no structural link. |
-| **Edits are fire-and-forget** | Transactional change engine with 9-state lifecycle, 6-level validation, sandbox execution, and rollback. Every edit is a tracked, validated, reversible operation. |
-| **Context costs scale with repo size** | Native TF-IDF + MinHash + LSH embeddings — zero external API calls. No OpenAI, no Cohere, no embedding costs. All computation is local. |
-| **Code search is fuzzy and imprecise** | Symbol resolution returns exact AST-bound symbols with line ranges, signatures, and types — not text matches. |
-
-### What ContextZero replaces
-
-ContextZero is not a search engine. It replaces the entire stack of `grep` + embeddings + chunk retrieval + file edits with a single, coherent system that understands code at the symbol level. One ingestion pass gives you:
-
-- **535+ symbols** extracted with exact line ranges, signatures, and type information
-- **Behavioral fingerprints** for every function (pure / read-only / read-write / side-effecting)
-- **Contract profiles** (input types, output types, error contracts, security contracts)
-- **Structural relations** (calls, imports, inherits, typed_as, overrides)
-- **Homolog detection** across disconnected code
-- **Blast radius** before and after any change
-- **Minimal context capsules** that fit any token budget
+<p align="center">
+  <img src="https://img.shields.io/badge/version-1.0.0-blue" alt="Version">
+  <img src="https://img.shields.io/badge/license-ISC-green" alt="License">
+  <img src="https://img.shields.io/badge/node-%3E%3D20-brightgreen" alt="Node">
+  <img src="https://img.shields.io/badge/tests-218%20passing-brightgreen" alt="Tests">
+  <img src="https://img.shields.io/badge/languages-TS%20%7C%20JS%20%7C%20Python%20%7C%20C%2B%2B%20%7C%20Go-orange" alt="Languages">
+  <img src="https://img.shields.io/badge/MCP-22%20tools-purple" alt="MCP Tools">
+</p>
 
 ---
 
-## Architecture
+ContextZero is a **free, self-hosted code analysis engine** that gives AI coding agents deep understanding of your codebase. It doesn't search code — it *understands* it. Every function gets a behavioral fingerprint. Every change gets a blast radius. Every symbol gets a contract.
+
+Built for developers who use Claude Code, Cursor, or any MCP-compatible tool and want their AI to stop guessing about what code does.
+
+### The Problem
+
+AI coding agents read files and grep for patterns. They don't know that `save_checkpoint()` writes to disk, that `_dts_newton_step()` mutates model weights in-place, or that changing `validate_input()` breaks 12 downstream callers. They guess. ContextZero eliminates the guessing.
+
+### What You Get
+
+| Capability | What It Does | Why It Matters |
+|-----------|-------------|---------------|
+| **Behavioral Profiling** | Classifies every function: `pure`, `read_only`, `read_write`, `side_effecting` — with specific mutation types | Know that `model.eval()` changes model state without reading 120 lines |
+| **Blast Radius** | 5-dimension impact analysis at configurable depth with confidence scoring | See the full chain of what breaks before you ship |
+| **Homolog Detection** | Finds parallel logic across disconnected code using 7-dimension weighted scoring | Catch the validator you forgot to update in the other module |
+| **Context Capsules** | Token-budgeted code packages with dependencies, callers, tests, contracts | Feed your AI exactly what it needs — nothing more |
+| **Contract Profiles** | Input/output types, error contracts, security contracts, invariants | Understand function promises without reading the implementation |
+| **Transactional Edits** | 9-state lifecycle with 6-level validation and persistent rollback | Every code change is tracked, validated, and reversible |
+
+### What Makes ContextZero Different
 
 ```
-┌──────────────────────────────────────────────────────────────────┐
-│               API Layer (REST + MCP Stdio Bridge)                │
-│         25+ endpoints · 22 MCP tools · auth · rate limiting      │
-├─────────────┬─────────────┬─────────────┬───────────────────────┤
-│  Ingestor   │  Analysis   │  Homolog    │  Transactional        │
-│  Pipeline   │  Engines    │  Inference  │  Change Engine        │
-├─────────────┼─────────────┼─────────────┼───────────────────────┤
-│ TS Adapter  │ Structural  │ 7-dim       │ 9-state lifecycle     │
-│ PY Adapter  │ Behavioral  │ Weighted    │ 6-level validation    │
-│ C++ Adapter │ Contract    │ Scoring     │ Sandbox execution     │
-│ Go Adapter  │ Blast Rad.  │ LSH         │ Persistent rollback   │
-│ (tree-sit.) │ Capsule     │ Banding     │                       │
-│             │ Uncertainty │             │                       │
-├─────────────┼─────────────┼─────────────┴───────────────────────┤
-│             │ Semantic Engine (TF-IDF · MinHash · Cosine)       │
-├─────────────┴─────────────┴─────────────────────────────────────┤
-│              PostgreSQL (pg_trgm · UUID · JSONB · LSH)           │
-└──────────────────────────────────────────────────────────────────┘
+Other tools:  "save_checkpoint is defined on line 45 of utils.py"
+ContextZero:  "save_checkpoint is read_write, touches file:torch_io,
+               has 3 callers, blast radius impacts 8 symbols at depth 2,
+               and has a near-duplicate in sigma3/ with 0.85 confidence"
 ```
 
-### Core Subsystems
-
-| Subsystem | Purpose |
-|---|---|
-| **Symbol Spine** | Versioned code symbols extracted via AST — TypeScript Compiler API, Python LibCST, tree-sitter (C++, Go) |
-| **Behavioral Engine** | 4-tier purity classification (`pure` / `read_only` / `read_write` / `side_effecting`), resource tracking |
-| **Contract Engine** | Input/output/error contracts, security contracts, invariant mining from tests |
-| **Semantic Engine** | Native TF-IDF + MinHash + LSH embeddings — zero external API dependencies |
-| **Homolog Engine** | 7-dimension weighted scoring for detecting parallel logic across disconnected code |
-| **Blast Radius** | 5-dimensional impact analysis (structural, behavioral, contract, homolog, historical) |
-| **Capsule Compiler** | Token-budgeted minimal context packages (minimal/standard/strict modes) |
-| **Transactional Editor** | 9-state lifecycle with 6-level progressive validation and sandboxed execution |
-| **MCP Bridge** | Native stdio bridge for Claude Code and Claude Desktop — 22 tools over JSON-RPC |
-
-### Supported Languages
-
-| Language | Adapter | Parser |
-|---|---|---|
-| TypeScript | `adapters/ts` | TypeScript Compiler API (full type resolution) |
-| JavaScript | `adapters/ts` | TypeScript Compiler API |
-| Python | `adapters/py` | LibCST with metadata providers |
-| C++ | `adapters/universal` | tree-sitter |
-| Go | `adapters/universal` | tree-sitter |
+This is not a search engine. It's an analysis engine. [See full benchmarks](BENCHMARKS.md).
 
 ---
 
 ## Quick Start
 
-### Prerequisites
-
-- **Node.js** >= 20.0.0
-- **PostgreSQL** >= 14 (with `pg_trgm` extension)
-- **Python 3** (optional, for Python file analysis)
-
-### Option 1: Docker (Recommended)
+### Docker (Recommended)
 
 ```bash
 git clone https://github.com/Ranjitbarnala0/context-zero.git
 cd context-zero
 
-# Set your API key
 echo "SCG_API_KEYS=your-secret-key" > .env
 
-# Start PostgreSQL + ContextZero server
 docker compose up -d
 
-# Verify
 curl -H "X-API-Key: your-secret-key" http://localhost:3100/health
 ```
 
-### Option 2: Local Development
+### Local Development
 
 ```bash
 git clone https://github.com/Ranjitbarnala0/context-zero.git
-cd context-zero
+cd context-zero && npm install
 
-npm install
+cp .env.example .env   # Edit with your DB credentials
 
-cp .env.example .env
-# Edit .env with your database credentials and API key
-
-createdb scg_v2
-npm run db:migrate
-
+createdb scg_v2 && npm run db:migrate
 npm run dev
 ```
 
-### Option 3: MCP Integration (Claude Code / Claude Desktop)
+### MCP Integration
 
-Add to your MCP configuration:
+Add to your Claude Code or Claude Desktop MCP configuration:
 
 ```json
 {
@@ -144,107 +104,121 @@ Add to your MCP configuration:
 
 Build first: `npm run build`
 
+Then in Claude Code, you can use all 22 tools:
+
+```
+> Use contextzero to find what save_checkpoint does
+> What's the blast radius of changing ingestRepo?
+> Find homologs of resolveSafePath
+> Compile a context capsule for the behavioral engine
+```
+
+---
+
+## Architecture
+
+```
+                        ContextZero Engine
+    ┌─────────────────────────────────────────────────┐
+    │          MCP Bridge (22 tools, stdio)            │
+    │          REST API (25+ endpoints, HTTP)          │
+    ├────────────┬────────────┬────────────┬───────────┤
+    │  Ingestor  │  Analysis  │  Homolog   │ Transact. │
+    │  Pipeline  │  Engines   │  Inference │ Editor    │
+    ├────────────┼────────────┼────────────┼───────────┤
+    │ TypeScript │ Behavioral │ 7-dim      │ 9-state   │
+    │ Python     │ Contract   │ Weighted   │ 6-level   │
+    │ C++        │ Blast Rad  │ Scoring    │ Sandbox   │
+    │ Go         │ Capsule    │ LSH        │ Rollback  │
+    │            │ Uncertainty│ Banding    │           │
+    ├────────────┴────────────┴────────────┴───────────┤
+    │     Semantic Engine (TF-IDF + MinHash + LSH)     │
+    ├──────────────────────────────────────────────────┤
+    │        PostgreSQL (pg_trgm, JSONB, GIN)          │
+    └──────────────────────────────────────────────────┘
+```
+
+### Language Support
+
+| Language | Parser | Depth |
+|----------|--------|-------|
+| TypeScript / JavaScript | TypeScript Compiler API | Full type resolution, AST normalization |
+| Python | LibCST with metadata providers | Full AST, nested functions, PyTorch patterns |
+| C++ | tree-sitter | Symbols + structure |
+| Go | tree-sitter | Symbols + structure |
+
+---
+
+## 22 MCP Tools
+
+### Discovery
+| Tool | Description |
+|------|-------------|
+| `scg_resolve_symbol` | Fuzzy symbol search with similarity ranking |
+| `scg_get_symbol_details` | Full symbol data with behavioral + contract profiles |
+| `scg_get_symbol_relations` | Call graph — callers, callees, imports, inheritance |
+
+### Analysis
+| Tool | Description |
+|------|-------------|
+| `scg_get_behavioral_profile` | Purity class, mutations, DB ops, network calls, file I/O |
+| `scg_get_contract_profile` | Input/output types, error contracts, security contracts |
+| `scg_get_invariants` | Derived constraints and assertions for a symbol |
+| `scg_get_uncertainty` | Where analysis confidence is low and why |
+| `scg_blast_radius` | 5-dimension impact analysis at configurable depth |
+| `scg_compile_context_capsule` | Token-budgeted context with priorities and omission rationale |
+| `scg_find_homologs` | Parallel logic detection with 7-dimension evidence |
+| `scg_persist_homologs` | Discover and save homolog relations |
+
+### Repository
+| Tool | Description |
+|------|-------------|
+| `scg_ingest_repo` | Full codebase ingestion with semantic embedding |
+| `scg_list_repos` | List registered repositories |
+| `scg_list_snapshots` | List snapshots for a repository |
+| `scg_snapshot_stats` | Symbol/relation counts + uncertainty report |
+
+### Change Management
+| Tool | Description |
+|------|-------------|
+| `scg_create_change_transaction` | Start a tracked code change |
+| `scg_apply_patch` | Apply file patches to a transaction |
+| `scg_validate_change` | 6-level progressive validation |
+| `scg_commit_change` | Finalize validated changes |
+| `scg_rollback_change` | Revert all patches with file restoration |
+| `scg_propagation_proposals` | Suggest parallel changes for homologs |
+| `scg_get_transaction` | Transaction status and details |
+
 ---
 
 ## Configuration
 
-All configuration is via environment variables (see `.env.example`):
+All configuration via environment variables:
 
 | Variable | Default | Description |
-|---|---|---|
+|----------|---------|-------------|
 | `DB_HOST` | `localhost` | PostgreSQL host |
 | `DB_PORT` | `5432` | PostgreSQL port |
 | `DB_NAME` | `scg_v2` | Database name |
 | `DB_USER` | `postgres` | Database user |
 | `DB_PASSWORD` | `postgres` | Database password |
-| `DB_MAX_CONNECTIONS` | `20` | Connection pool size |
 | `SCG_PORT` | `3100` | HTTP server port |
-| `SCG_API_KEYS` | *(none)* | Comma-separated API keys. **If empty, all requests are rejected.** |
-| `SCG_ALLOWED_BASE_PATHS` | *(none)* | Comma-separated allowed repository directories |
-| `SCG_CORS_ORIGINS` | *(none)* | Comma-separated CORS origins (fail-closed) |
-| `LOG_LEVEL` | `info` | `debug` / `info` / `warn` / `error` / `fatal` |
+| `SCG_API_KEYS` | *(none)* | API keys. **Empty = all requests rejected.** |
+| `SCG_ALLOWED_BASE_PATHS` | *(none)* | Allowed repository directories |
+| `LOG_LEVEL` | `info` | `debug` / `info` / `warn` / `error` |
 
 ---
 
-## API Reference
+## Security
 
-All endpoints accept `POST` with JSON body. Authenticate with `Authorization: Bearer <key>` or `X-API-Key: <key>`.
-
-### Repository Management
-
-| Endpoint | Description |
-|---|---|
-| `POST /scg_register_repo` | Register a repository with its filesystem path |
-| `POST /scg_ingest_repo` | Full codebase ingestion (requires prior registration) |
-| `POST /scg_incremental_index` | Re-index only changed files |
-| `POST /scg_batch_embed` | Generate semantic embeddings for a snapshot |
-
-### Core Query Tools
-
-| Endpoint | Description |
-|---|---|
-| `POST /scg_resolve_symbol` | Fuzzy symbol search by name (pg_trgm) |
-| `POST /scg_get_symbol_details` | Symbol details with `view_mode` (code/summary/signature) |
-| `POST /scg_get_symbol_relations` | Structural relations (callers, callees, imports) |
-| `POST /scg_get_behavioral_profile` | Purity class, resource touches, side effects |
-| `POST /scg_get_contract_profile` | Input/output/error/security contracts |
-| `POST /scg_get_invariants` | Invariants scoped to a symbol |
-| `POST /scg_get_uncertainty` | Uncertainty report for a snapshot |
-
-### Analysis Tools
-
-| Endpoint | Description |
-|---|---|
-| `POST /scg_find_homologs` | Find parallel logic (7-dimension scoring) |
-| `POST /scg_blast_radius` | 5-dimensional impact analysis |
-| `POST /scg_compile_context_capsule` | Token-budgeted context compilation |
-| `POST /scg_persist_homologs` | Discover and persist homolog relations |
-
-### Change Management Tools
-
-| Endpoint | Description |
-|---|---|
-| `POST /scg_create_change_transaction` | Create a tracked change transaction |
-| `POST /scg_apply_patch` | Apply file patches to a transaction |
-| `POST /scg_validate_change` | 6-level progressive validation |
-| `POST /scg_commit_change` | Commit a validated transaction |
-| `POST /scg_rollback_change` | Rollback with persistent file restoration |
-| `POST /scg_propagation_proposals` | Homolog co-change proposals |
-| `POST /scg_get_transaction` | Transaction status |
-
-### Utility
-
-| Endpoint | Description |
-|---|---|
-| `POST /scg_list_repos` | List registered repositories |
-| `POST /scg_list_snapshots` | List snapshots for a repo |
-| `POST /scg_snapshot_stats` | File/symbol/relation counts + uncertainty |
-| `GET /health` | Health check (no auth) |
-| `GET /ready` | Readiness probe (no auth) |
-| `GET /metrics` | Prometheus metrics (no auth) |
-
-### Example: Register and Ingest a Repository
-
-```bash
-# Step 1: Register the repository
-curl -X POST http://localhost:3100/scg_register_repo \
-  -H "Content-Type: application/json" \
-  -H "X-API-Key: your-key" \
-  -d '{
-    "repo_name": "my-project",
-    "repo_path": "/home/user/projects/my-project"
-  }'
-
-# Step 2: Ingest at a specific commit
-curl -X POST http://localhost:3100/scg_ingest_repo \
-  -H "Content-Type: application/json" \
-  -H "X-API-Key: your-key" \
-  -d '{
-    "repo_id": "<repo-uuid-from-step-1>",
-    "commit_sha": "abc123def",
-    "branch": "main"
-  }'
-```
+| Control | How |
+|---------|-----|
+| Authentication | Fail-closed API keys, constant-time comparison |
+| Path traversal | Symlink-aware `realpathSync`, URL-encoding rejection |
+| Command injection | `execFileSync` with array args (no shell) |
+| Sandbox | ulimit, SIGKILL escalation, env sanitization |
+| Rate limiting | Per-route sliding window |
+| Error responses | No stack traces, no internal paths |
 
 ---
 
@@ -253,122 +227,57 @@ curl -X POST http://localhost:3100/scg_ingest_repo \
 ```bash
 npm run typecheck    # Type check
 npm run lint         # Lint
-npm test             # Run tests
+npm test             # Run tests (218 cases)
 npm run test:ci      # Tests with coverage
-npm run test:watch   # Watch mode
 npm run build        # Build for production
-npm start            # Start production server (REST API)
-npm run mcp          # Start MCP stdio bridge
-npm run mcp:dev      # Start MCP bridge (dev mode)
-```
-
-### Project Structure
-
-```
-src/
-├── types.ts                    # Shared interfaces, enums, constants
-├── logger.ts                   # Structured JSON logger
-├── cache/
-│   └── index.ts                # LRU cache with TTL and prefix invalidation
-├── db-driver/
-│   ├── index.ts                # PostgreSQL connection pool
-│   ├── core_data.ts            # CRUD for all core entities
-│   └── batch-loader.ts         # Chunked batch query layer
-├── adapters/
-│   ├── ts/
-│   │   ├── index.ts            # TypeScript Compiler API adapter
-│   │   └── ast-normalizer.ts   # Rename/whitespace-invariant AST hashing
-│   ├── py/
-│   │   └── extractor.py        # Python LibCST adapter
-│   └── universal/
-│       └── index.ts            # tree-sitter adapter (C++, Go, TS, JS, Python)
-├── semantic-engine/
-│   ├── index.ts                # Multi-view embedding + LSH indexing
-│   ├── similarity.ts           # TF-IDF, MinHash, cosine, LSH band hashing
-│   └── tokenizer.ts            # Code-aware 5-view tokenizer
-├── analysis-engine/
-│   ├── index.ts                # Structural graph engine
-│   ├── behavioral.ts           # Purity classification + fingerprints
-│   ├── contracts.ts            # Contract extraction + invariant mining
-│   ├── blast-radius.ts         # 5-dimension impact analysis
-│   ├── capsule-compiler.ts     # Token-budgeted context compilation
-│   └── uncertainty.ts          # 12-source uncertainty tracking
-├── homolog-engine/
-│   └── index.ts                # 7-dimension weighted inference
-├── transactional-editor/
-│   ├── index.ts                # 9-state change lifecycle
-│   └── sandbox.ts              # Process isolation for validation
-├── ingestor/
-│   └── index.ts                # Full + incremental ingestion pipeline
-├── metrics/
-│   └── index.ts                # Prometheus metrics exposition
-├── middleware/
-│   ├── auth.ts                 # API key auth (constant-time comparison)
-│   ├── rate-limiter.ts         # Sliding window rate limiting
-│   └── validation.ts           # Request body validation
-├── mcp-interface/
-│   └── index.ts                # Express HTTP server (25+ endpoints)
-└── mcp-bridge/
-    ├── index.ts                # MCP stdio server (22 tools)
-    └── handlers.ts             # Direct-call tool handlers
-
-db/
-├── schema.sql                  # PostgreSQL schema (15 tables)
-├── migrations/                 # Versioned SQL migrations
-└── migrate.ts                  # Migration runner
-```
-
-### Database Migrations
-
-```bash
-npm run db:migrate                    # Apply pending migrations
-npx ts-node db/migrate.ts --status    # Check migration status
+npm start            # Start REST API
+npm run mcp          # Start MCP bridge
 ```
 
 ---
 
-## Security
+## Benchmarks
 
-- **Authentication**: API key required on all endpoints (fail-closed). Constant-time comparison via `crypto.timingSafeEqual`.
-- **Brute-Force Protection**: Per-IP exponential backoff with bounded tracking (10K max entries).
-- **Rate Limiting**: Per-route sliding window limits. Expensive endpoints have lower thresholds.
-- **Path Traversal Protection**: All file operations resolve symlinks via `realpathSync` before containment checks. URL-encoded and backslash path injection blocked at validation layer.
-- **Command Injection Prevention**: All subprocess execution uses `execFileSync`/`spawn` with array args (no shell interpolation).
-- **Sandbox Execution**: Validation commands run in isolated subprocesses with environment sanitization, resource limits (ulimit), timeout enforcement, and SIGKILL escalation.
-- **Error Sanitization**: API responses never leak stack traces or internal paths.
-- **CORS**: Fail-closed — no configured origins means no CORS headers emitted.
-- **Body Size Limits**: Per-route enforcement (10MB ingest, 5MB patches, 100KB queries).
-- **Input Validation**: Every route uses centralized `validateBody()` — UUID format, string length, numeric bounds, path safety.
+Full benchmark data with competitive analysis: **[BENCHMARKS.md](BENCHMARKS.md)**
+
+Highlights:
+- **2,211 symbols** extracted from a 50-file TypeScript + Python codebase in **7.1 seconds**
+- **100% behavioral profile coverage** — every function classified
+- **Zero false positives** on DB operation detection
+- **Exact token budget compliance** on context capsules
+- **Zero external API calls** — all computation is local
+- **Free and self-hosted** — no per-seat pricing, no data leaves your machine
+
+---
+
+## What's Next
+
+**ContextZero v2** is in development. The next version will introduce significantly deeper analysis capabilities, broader language coverage, and enterprise-scale features that go well beyond what any existing tool offers today. v1 already occupies a category that no other tool fills — v2 will widen that gap substantially.
+
+Stay updated: **Watch this repository** for release announcements.
 
 ---
 
 ## Bug Reports
 
-We treat every bug report as a P0. If you find an issue — wrong analysis, missing data, crashes, incorrect classifications — we fix it natively, not with patches. Permanent, root-cause fixes only.
+Every bug gets a root-cause fix, not a patch. If ContextZero gives you wrong data, that's a P0.
 
-**Report bugs**: [Open an issue](https://github.com/Ranjitbarnala0/context-zero/issues) with:
-- The tool name and input you used
-- What ContextZero returned
-- What the correct result should be
-- Source code snippet if possible
-
-We respond to bug reports and ship fixes rapidly.
+**Report**: [Open an issue](https://github.com/Ranjitbarnala0/context-zero/issues) with the tool name, input, actual output, and expected output.
 
 ---
 
 ## Enterprise
 
-ContextZero is **free and open source** under the ISC license. Individual developers, startups, and open-source projects can use it without any restrictions.
+ContextZero is **free and open source** under the ISC license. Use it however you want — personal projects, commercial products, enterprise infrastructure. No restrictions.
 
-For enterprises deploying ContextZero on production codebases, we offer:
+For organizations that need more:
 
-- **Priority Support** — Direct engineering support with SLA guarantees
-- **Custom Language Adapters** — tree-sitter grammar development for proprietary or niche languages
-- **Private Deployment** — On-premise, air-gapped, or private cloud deployment with security hardening
-- **Custom Integrations** — CI/CD pipelines, code review systems, IDE extensions, internal toolchains
-- **Advanced Features** — Runtime trace ingestion, framework-specific plugins (NestJS, Django, FastAPI, Prisma), and custom homolog classification models
-- **Training & Architecture** — Team onboarding, codebase analysis workshops, and architecture consulting
-- **Dedicated Engineering** — Custom feature development for your specific codebase and workflow needs
+- **Priority Support** with SLA guarantees
+- **Custom Language Adapters** for proprietary languages
+- **Private Deployment** — on-premise, air-gapped, private cloud
+- **Custom Integrations** — CI/CD, code review, IDE extensions
+- **Advanced Features** — runtime traces, framework plugins, custom models
+- **Dedicated Engineering** for your specific workflow
 
 **Contact**: [ranjitbarnala0@gmail.com](mailto:ranjitbarnala0@gmail.com)
 
@@ -376,6 +285,4 @@ For enterprises deploying ContextZero on production codebases, we offer:
 
 ## License
 
-ISC License — free for everyone, forever. See [LICENSE](LICENSE) for details.
-
-Use ContextZero however you want — personal projects, commercial products, enterprise infrastructure. No restrictions, no usage limits, no tracking. Enterprise services (support, deployment, custom development) are available separately for organizations that need them.
+ISC License — free for everyone, forever. See [LICENSE](LICENSE).
